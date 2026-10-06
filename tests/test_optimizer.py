@@ -324,3 +324,26 @@ def test_door_to_door_includes_home_side_when_destination_drives_known():
     enrich_drives([it], {"TPA": 30}, 15.0)
     assert it.door_to_door_cost == round(it.total_price + 60 / 60 * 15 + it.home_side_cost, 2)
     assert "Home-side $" in to_dataframe([it]).columns
+
+
+def test_clear_drives_restores_the_default_rate_and_drops_drives():
+    """Regression: a cleared place must not leave its drives or $/hour on reused itineraries,
+    or home-side drive time would still be priced at the old place's rate."""
+    from optimizer import DEFAULT_DRIVE_VALUE_PER_HOUR, clear_drives
+
+    costs = {"PHL": HomeCost(40, 17.0)}
+    (it,) = build_itineraries([f("PHL", "TPA", 8, hour=9)], [f("TPA", "PHL", 11, hour=16)], q(origins=["PHL"]))
+    enrich_home([it], costs)
+    default_home_side = it.home_side_cost
+    assert default_home_side == round(51 + 80 / 60 * DEFAULT_DRIVE_VALUE_PER_HOUR, 2)
+
+    enrich_drives([it], {"TPA": 30}, 60.0)
+    assert it.drive_value_per_hour == 60.0 and it.home_side_cost == round(51 + 80 / 60 * 60, 2)
+    assert it.door_to_door_cost is not None
+
+    assert clear_drives([it]) == [it]
+    assert (it.drive_out_min, it.drive_back_min) == (None, None)
+    assert it.door_to_door_cost is None
+    assert it.drive_value_per_hour == DEFAULT_DRIVE_VALUE_PER_HOUR
+    assert it.home_side_cost == default_home_side
+    assert it.parking_cost == 51.0 and it.home_drive_min == 80   # home-side data is not touched

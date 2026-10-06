@@ -34,6 +34,7 @@ from optimizer import (
     Availability,
     GetawayQuery,
     Itinerary,
+    clear_drives,
     enrich_drives,
     enrich_weather,
     find_itineraries,
@@ -982,6 +983,8 @@ def main() -> None:
     pm = st.session_state.get("place_mode") or {}
     if pm.get("place"):
         enrich_drives(itins, {c: m for c, (m, _src) in pm["drives"].items()}, pm["value"])
+    else:
+        clear_drives(itins)  # run_search reuses cached objects; drop a cleared place's drives and rate
     ranked = {
         "Cheapest package": rank_by_price,
         "Best window fit": rank_by_schedule,

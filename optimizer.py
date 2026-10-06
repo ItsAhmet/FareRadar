@@ -39,6 +39,8 @@ from holidays import holidays_between
 from database import previous_prices, query_flights, route_medians
 from models import Flight
 
+DEFAULT_DRIVE_VALUE_PER_HOUR = 15.0  # $/hour of your time until a place sets the rate
+
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
 
@@ -191,7 +193,7 @@ class Itinerary:
     # Filled by `enrich_drives()` in place-based mode.
     drive_out_min: float | None = None  # arrival airport → your place
     drive_back_min: float | None = None  # your place → departure airport
-    drive_value_per_hour: float = 15.0
+    drive_value_per_hour: float = DEFAULT_DRIVE_VALUE_PER_HOUR
     # Filled by `enrich_home()`: getting to and from the home airports.
     home_drive_min: float | None = None  # home→departure airport + return airport→home (+ inter-home if open-jaw)
     parking_cost: float = 0.0            # parking at the departure home airport for the trip
@@ -447,13 +449,26 @@ def enrich_weather(
 def enrich_drives(
     itineraries: list[Itinerary],
     minutes_by_airport: dict[str, float],
-    value_per_hour: float = 15.0,
+    value_per_hour: float = DEFAULT_DRIVE_VALUE_PER_HOUR,
 ) -> list[Itinerary]:
     """Attach drive times from the place to each leg's airport."""
     for it in itineraries:
         it.drive_out_min = minutes_by_airport.get(it.outbound.destination)
         it.drive_back_min = minutes_by_airport.get(it.inbound.origin)
         it.drive_value_per_hour = value_per_hour
+    return itineraries
+
+
+def clear_drives(itineraries: list[Itinerary]) -> list[Itinerary]:
+    """Undo `enrich_drives()`: drop drive minutes and restore the default $/hour.
+
+    Callers that reuse Itinerary objects across reruns (the dashboard's search cache)
+    must call this when no place is set, or an earlier place's drives and rate linger.
+    """
+    for it in itineraries:
+        it.drive_out_min = None
+        it.drive_back_min = None
+        it.drive_value_per_hour = DEFAULT_DRIVE_VALUE_PER_HOUR
     return itineraries
 
 

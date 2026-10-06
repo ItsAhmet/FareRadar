@@ -138,3 +138,21 @@ def test_dashboard_labels_follow_the_configured_home_airports(mock_db, monkeypat
     assert at.sidebar.title[0].value == "✈️ Avelo Getaways"
     markdown = " ".join(m.value for m in at.markdown)
     assert "PHL hub" in markdown and "ILG hub" not in markdown
+
+
+def test_clearing_the_place_drops_cached_drive_times(mock_db):
+    """Regression: run_search hands back the same cached Itinerary objects while the
+    query is unchanged, and drives were only attached while a place was set, so clearing
+    the place (destinations unchanged) left stale drive minutes and $/hour on them."""
+    database.set_place("Siesta Key, FL", "Siesta Key, Florida, US", 27.2673, -82.5459)
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    at.multiselect[0].set_value(["TPA"]).run()  # same airport set with and without the place
+    next(t for t in at.text_input if t.label == "Place (optional)").set_value("Siesta Key, FL").run()
+    assert not at.exception, at.exception
+    df = next(d.value for d in at.dataframe if "Door-to-door" in d.value.columns)
+    assert len(df) and df["Door-to-door"].notna().all()
+
+    next(t for t in at.text_input if t.label == "Place (optional)").set_value("").run()
+    assert not at.exception, at.exception
+    df = next(d.value for d in at.dataframe if "Door-to-door" in d.value.columns)
+    assert len(df) and df["Door-to-door"].isna().all() and df["Drive (min)"].isna().all()
