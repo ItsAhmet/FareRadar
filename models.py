@@ -7,7 +7,7 @@ from datetime import date, datetime, timedelta
 
 @dataclass(frozen=True)
 class Flight:
-    """One nonstop Avelo flight on one date at one observed price.
+    """One nonstop flight on one date at one observed price.
 
     `price` is the fare we would pay: the Avelo PLUS member fare whenever the
     site shows one (`is_member_fare=True`), otherwise the public fare.
@@ -27,10 +27,12 @@ class Flight:
     promo_code: str | None = None  # promo applied when this fare was observed
     timestamp_scraped: datetime = field(default_factory=datetime.now)
     flight_id: str = ""  # stable identity for upserts; derived unless given
+    airline: str = "XP"  # IATA code: XP = Avelo, F9 = Frontier
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "origin", self.origin.strip().upper())
         object.__setattr__(self, "destination", self.destination.strip().upper())
+        object.__setattr__(self, "airline", (self.airline or "XP").strip().upper())
         if not self.flight_id:
             object.__setattr__(self, "flight_id", self.make_id(self.flight_number, self.origin, self.destination))
         if self.arrival_datetime is None and self.duration_minutes:
