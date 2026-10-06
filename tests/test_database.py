@@ -3,6 +3,7 @@ from datetime import date, datetime
 
 import pytest
 
+import config
 import database as db
 from models import Flight
 
@@ -214,3 +215,14 @@ def test_route_queries_accept_several_origins(conn):
     assert s["flights"] == 3 and s["routes"] == 3
     fresh = db.route_freshness(["ILG", "PHL"], ["TPA"], conn=conn)
     assert {(r["origin"], r["destination"]) for r in fresh} == {("ILG", "TPA"), ("PHL", "TPA"), ("TPA", "PHL")}
+
+
+def test_settings_and_home_costs(conn):
+    assert db.get_setting("nope", 7, conn) == 7
+    db.set_setting("x", {"a": 1}, conn)
+    assert db.get_setting("x", None, conn) == {"a": 1}
+    costs = db.home_costs(conn)
+    assert costs["PHL"].parking_per_day == 17.0 and costs["PHL"].drive_min is None
+    db.set_home_cost("phl", 40, 20.0, conn)
+    assert db.home_costs(conn)["PHL"] == config.HomeCost(40, 20.0)
+    assert db.home_costs(conn)["ILG"] == config.DEFAULT_HOME_COSTS["ILG"]

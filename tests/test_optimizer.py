@@ -3,6 +3,7 @@ from datetime import date, datetime, time
 import pytest
 
 import database as db
+from config import HomeCost
 from models import Flight
 from optimizer import (
     Availability,
@@ -10,7 +11,10 @@ from optimizer import (
     Window,
     build_itineraries,
     can_pair,
+    enrich_drives,
+    enrich_home,
     find_itineraries,
+    inter_home_minutes,
     rank_by_price,
     rank_by_schedule,
     to_dataframe,
@@ -288,3 +292,35 @@ def test_query_requires_an_origin():
 def test_dataframe_has_home_column():
     its = build_itineraries([f("PHL", "TPA", 8, hour=9)], [f("TPA", "PHL", 11, hour=16)], q(origins=["PHL"]))
     assert list(to_dataframe(its)["Home"]) == ["PHL"]
+
+
+def test_home_side_costs_add_parking_and_drives():
+    costs = {"ILG": HomeCost(20, 0.0), "PHL": HomeCost(40, 17.0), "BWI": HomeCost(None, 14.0)}
+    ilg = build_itineraries([f("ILG", "TPA", 8, hour=8)], [f("TPA", "ILG", 11, hour=15)], q(origins=["ILG"]))[0]
+    phl = build_itineraries([f("PHL", "TPA", 8, hour=9)], [f("TPA", "PHL", 11, hour=16)], q(origins=["PHL"]))[0]
+    bwi = build_itineraries([f("BWI", "TPA", 8, hour=9)], [f("TPA", "BWI", 11, hour=16)], q(origins=["BWI"]))[0]
+    enrich_home([ilg, phl, bwi], costs)
+    assert (ilg.parking_cost, ilg.home_drive_min) == (0.0, 40)
+    assert (phl.parking_cost, phl.home_drive_min) == (51.0, 80)   # 3 nights × $17
+    assert bwi.home_drive_min is None and bwi.parking_cost == 42.0
+    assert phl.home_side_cost == round(51 + 80 / 60 * 15, 2)
+
+
+def test_open_jaw_adds_the_drive_between_home_airports():
+    costs = {"ILG": HomeCost(20, 0.0), "PHL": HomeCost(40, 17.0)}
+    its = build_itineraries([f("ILG", "TPA", 8, hour=8)], [f("TPA", "PHL", 11, hour=16)],
+                            q(origins=["ILG", "PHL"], allow_open_jaw=True))
+    (jaw,) = enrich_home(its, costs)
+    assert 30 < inter_home_minutes("ILG", "PHL") < 50
+    assert jaw.home_drive_min == round(20 + 40 + inter_home_minutes("PHL", "ILG"), 1)
+    assert jaw.parking_cost == 0.0   # car is parked at ILG
+
+
+def test_door_to_door_includes_home_side_when_destination_drives_known():
+    costs = {"PHL": HomeCost(40, 17.0)}
+    (it,) = build_itineraries([f("PHL", "TPA", 8, hour=9)], [f("TPA", "PHL", 11, hour=16)], q(origins=["PHL"]))
+    enrich_home([it], costs)
+    assert it.door_to_door_cost is None            # destination drives unknown → unchanged behaviour
+    enrich_drives([it], {"TPA": 30}, 15.0)
+    assert it.door_to_door_cost == round(it.total_price + 60 / 60 * 15 + it.home_side_cost, 2)
+    assert "Home-side $" in to_dataframe([it]).columns

@@ -34,7 +34,7 @@ import random
 import pandas as pd
 
 import config
-from config import DESTINATIONS, airport_name, distance_miles
+from config import DESTINATIONS, HomeCost, airport_name, distance_miles
 from holidays import holidays_between
 from database import previous_prices, query_flights, route_medians
 from models import Flight
@@ -192,6 +192,9 @@ class Itinerary:
     drive_out_min: float | None = None  # arrival airport → your place
     drive_back_min: float | None = None  # your place → departure airport
     drive_value_per_hour: float = 15.0
+    # Filled by `enrich_home()`: getting to and from the home airports.
+    home_drive_min: float | None = None  # home→departure airport + return airport→home (+ inter-home if open-jaw)
+    parking_cost: float = 0.0            # parking at the departure home airport for the trip
 
     @property
     def drive_total_min(self) -> float | None:
@@ -200,11 +203,16 @@ class Itinerary:
         return round(self.drive_out_min + self.drive_back_min, 1)
 
     @property
+    def home_side_cost(self) -> float:
+        """Parking plus your time driving to/from the home airports (0 for unknown drives)."""
+        return round(self.parking_cost + (self.home_drive_min or 0.0) / 60 * self.drive_value_per_hour, 2)
+
+    @property
     def door_to_door_cost(self) -> float | None:
-        """Fares plus your time in the car, priced at drive_value_per_hour."""
+        """Fares, your time in the car at the destination, and home-side parking/drive."""
         if self.drive_total_min is None:
             return None
-        return round(self.total_price + self.drive_total_min / 60 * self.drive_value_per_hour, 2)
+        return round(self.total_price + self.drive_total_min / 60 * self.drive_value_per_hour + self.home_side_cost, 2)
 
     @property
     def fare_total(self) -> float:
@@ -449,6 +457,26 @@ def enrich_drives(
     return itineraries
 
 
+def inter_home_minutes(a: str, b: str) -> float:
+    """Rough drive between two home airports: road ≈ 1.25 × straight line at 50 mph."""
+    return round(distance_miles(a, b) * 1.25 / 50 * 60, 1)
+
+
+def enrich_home(itineraries: list[Itinerary], costs: dict[str, HomeCost]) -> list[Itinerary]:
+    """Attach parking and home-side drive time from the owner's per-airport costs."""
+    for it in itineraries:
+        out_c, back_c = costs.get(it.home_out), costs.get(it.home_back)
+        days_parked = max(it.nights, 1)
+        it.parking_cost = round((out_c.parking_per_day if out_c else 0.0) * days_parked, 2)
+        legs = [out_c.drive_min if out_c else None, back_c.drive_min if back_c else None]
+        if any(m is None for m in legs):
+            it.home_drive_min = None
+        else:
+            extra = inter_home_minutes(it.home_back, it.home_out) if it.is_open_jaw else 0.0
+            it.home_drive_min = round(legs[0] + legs[1] + extra, 1)
+    return itineraries
+
+
 # --------------------------------------------------------------------------- #
 # DB-backed entry point and presentation
 # --------------------------------------------------------------------------- #
@@ -539,6 +567,7 @@ def to_dataframe(itineraries: list[Itinerary]) -> pd.DataFrame:
                 "Δ°F vs home": it.temp_delta_f,
                 "Drive (min)": it.drive_total_min,
                 "Door-to-door": it.door_to_door_cost,
+                "Home-side $": it.home_side_cost,
                 "Last Scraped": it.last_scraped.strftime("%b %d %H:%M"),
             }
         )

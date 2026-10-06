@@ -21,6 +21,7 @@ from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+import config
 from config import DB_PATH, HISTORY_RETENTION_DAYS
 from models import Flight
 
@@ -135,6 +136,11 @@ CREATE TABLE IF NOT EXISTS watchlist (
     payload      TEXT    NOT NULL,   -- JSON
     state        TEXT    NOT NULL DEFAULT '{}',
     created_at   TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+    key          TEXT PRIMARY KEY,
+    value        TEXT NOT NULL      -- JSON
 );
 """
 
@@ -782,3 +788,40 @@ def update_booking_state(booking_id: int, state: dict, conn: sqlite3.Connection 
 
 def remove_booking(booking_id: int, conn: sqlite3.Connection | None = None) -> int:
     return _run("DELETE FROM bookings WHERE booking_id = ?", (booking_id,), conn)
+
+
+# --------------------------------------------------------------------------- #
+# Settings (owner preferences: home-airport costs, later memberships)
+# --------------------------------------------------------------------------- #
+
+
+def get_setting(key: str, default=None, conn: sqlite3.Connection | None = None):
+    rows = _fetch("SELECT value FROM settings WHERE key = ?", (key,), conn)
+    return json.loads(rows[0]["value"]) if rows else default
+
+
+def set_setting(key: str, value, conn: sqlite3.Connection | None = None) -> None:
+    _run("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+         (key, json.dumps(value)), conn)
+
+
+def home_costs(conn: sqlite3.Connection | None = None) -> dict[str, config.HomeCost]:
+    """Per home airport: owner-set drive minutes and parking $/day over the defaults."""
+    stored = get_setting("home_costs", {}, conn) or {}
+    out: dict[str, config.HomeCost] = {}
+    for code in config.HOME_AIRPORT_INFO:
+        default = config.DEFAULT_HOME_COSTS.get(code, config.HomeCost())
+        mine = stored.get(code, {})
+        drive = mine.get("drive_min", default.drive_min)
+        out[code] = config.HomeCost(
+            float(drive) if drive is not None else None,
+            float(mine.get("parking_per_day", default.parking_per_day)),
+        )
+    return out
+
+
+def set_home_cost(code: str, drive_min: float | None, parking_per_day: float,
+                  conn: sqlite3.Connection | None = None) -> None:
+    stored = get_setting("home_costs", {}, conn) or {}
+    stored[code.upper()] = {"drive_min": drive_min, "parking_per_day": float(parking_per_day)}
+    set_setting("home_costs", stored, conn)
