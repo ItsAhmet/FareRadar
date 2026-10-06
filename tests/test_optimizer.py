@@ -157,6 +157,12 @@ def test_dataframe_columns():
     assert df.loc[0, "Total Getaway Cost"] == 200
 
 
+def test_dataframe_weather_column_is_not_named_after_one_home_airport():
+    df = to_dataframe(build_itineraries([f("ILG", "TPA", 8, hour=8)], [f("TPA", "ILG", 11, hour=12)], q()))
+    assert "Δ°F vs home" in df.columns
+    assert not [c for c in df.columns if "ILG" in c]
+
+
 def test_query_validation():
     with pytest.raises(ValueError):
         q(windows=[])

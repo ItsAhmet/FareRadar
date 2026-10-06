@@ -1,4 +1,4 @@
-"""Streamlit dashboard: Flexible Getaways from Wilmington, DE (ILG) on Avelo.
+"""Streamlit dashboard: Flexible Getaways from your home airports on Avelo.
 
 Run with:  streamlit run app.py
 
@@ -47,7 +47,7 @@ from optimizer import (
 )
 from run_scraper import build_command
 
-st.set_page_config(page_title="Avelo Getaways from ILG", page_icon="✈️", layout="wide")
+st.set_page_config(page_title="Avelo Getaways", page_icon="✈️", layout="wide")
 
 PRICE_SCALE = ["#e8f1fb", "#b9d3f0", "#84b0e3", "#4f8bd3", "#2a63b8", "#153f8a"]  # one hue, light = cheap
 ACCENT = "#2a63b8"
@@ -238,7 +238,7 @@ def availability_picker() -> tuple[Availability, Availability | None, bool]:
 
 
 def sidebar() -> tuple[GetawayQuery | None, list[str], tuple[date, date], str, dict]:
-    st.sidebar.title("✈️ ILG Getaways")
+    st.sidebar.title("✈️ Avelo Getaways")
     st.sidebar.caption(f"Nonstop on Avelo from {config.HOME_AIRPORTS[config.PRIMARY_HOME].city}")
 
     today = date.today()
@@ -544,7 +544,7 @@ def system_map(selected: list[str]) -> None:
         f'<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:rgb{config.REGION_COLORS[r]};margin-right:4px"></span>{r}'
         for r in config.REGIONS
     )
-    legend += f' &nbsp; <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:rgb{config.HUB_COLOR};margin-right:4px"></span>ILG hub'
+    legend += f' &nbsp; <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:rgb{config.HUB_COLOR};margin-right:4px"></span>{config.PRIMARY_HOME} hub'
     legend += f' &nbsp; <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:rgb{config.INACTIVE_COLOR};margin-right:4px"></span>not selected'
     st.markdown(f'<div style="font-size:0.85rem">{legend}</div>', unsafe_allow_html=True)
 
@@ -849,7 +849,7 @@ def results_table(ranked: list[Itinerary], version: float = 0.0) -> None:
             "Deal vs Typical": st.column_config.NumberColumn(format="%+.0f%%", help="Positive = cheaper than the median fare on these routes"),
             "Fit": st.column_config.ProgressColumn("Fit", min_value=0, max_value=1, format="%.0f%%"),
             "Sun Score": st.column_config.ProgressColumn("Sun", min_value=0, max_value=1, format="%.2f", help="Warm and dry over the trip days; blank beyond the 16-day forecast"),
-            "Δ°F vs ILG": st.column_config.NumberColumn(format="%+.0f°F"),
+            "Δ°F vs home": st.column_config.NumberColumn(format="%+.0f°F"),
             "Drive (min)": st.column_config.NumberColumn(format="%.0f"),
             "Door-to-door": st.column_config.NumberColumn(format="$%d", help="Fares plus drive time at your $/hour"),
             "Member Fare": st.column_config.CheckboxColumn(disabled=True),
@@ -859,7 +859,7 @@ def results_table(ranked: list[Itinerary], version: float = 0.0) -> None:
             "Rank", "Window", "Destination", "Route Mix", "Total Getaway Cost", "Deal vs Typical", "Trend", "Signals",
             "Out Route", "Out Date", "Out Time", "Out Price",
             "Back Route", "Back Date", "Back Time", "Back Price",
-            "Nights", "Fit", "Sun Score", "Δ°F vs ILG", "Drive (min)", "Door-to-door",
+            "Nights", "Fit", "Sun Score", "Δ°F vs home", "Drive (min)", "Door-to-door",
             "Member Fare", "Savings vs Public", "Add-on Fees", "Times Verified",
             "Airport Gap (mi)", "Last Scraped",
         ],
@@ -867,7 +867,7 @@ def results_table(ranked: list[Itinerary], version: float = 0.0) -> None:
     if not all(it.time_verified for it in ranked):
         st.caption("Rows without **Times Verified** come from calendar scrapes (day known, time not). "
                    "Run the scraper with depth *full* to confirm they fit your window's hours.")
-    st.download_button("Download CSV", df.to_csv(index=False).encode(), "ilg_getaways.csv", "text/csv")
+    st.download_button("Download CSV", df.to_csv(index=False).encode(), "avelo_getaways.csv", "text/csv")
 
 
 def calendar_heatmap(cal: pd.DataFrame, destinations: list[str], span: tuple[date, date]) -> None:
@@ -961,7 +961,7 @@ def main() -> None:
     version = _db_version()
 
     unread = database.unread_event_count()
-    st.title("Flexible Getaways from Wilmington (ILG)" + (f"  🔔 {unread}" if unread else ""))
+    st.title("Flexible Getaways from " + " / ".join(config.HOME_CODES) + (f"  🔔 {unread}" if unread else ""))
     member_badge()
     system_map(destinations)
 

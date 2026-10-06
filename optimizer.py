@@ -184,7 +184,7 @@ class Itinerary:
     previous_total: float | None = None  # total at the previous scrape of both legs
     # Filled by `enrich_weather()` (only inside the 16-day forecast horizon).
     sun_score: float | None = None
-    temp_delta_f: float | None = None  # destination high minus ILG high
+    temp_delta_f: float | None = None  # destination high minus primary-home high
     # Filled by `enrich_drives()` in place-based mode.
     drive_out_min: float | None = None  # arrival airport → your place
     drive_back_min: float | None = None  # your place → departure airport
@@ -511,7 +511,7 @@ def to_dataframe(itineraries: list[Itinerary]) -> pd.DataFrame:
                 "Times Verified": it.time_verified,
                 "Airport Gap (mi)": it.pair_miles,
                 "Sun Score": it.sun_score,
-                "Δ°F vs ILG": it.temp_delta_f,
+                "Δ°F vs home": it.temp_delta_f,
                 "Drive (min)": it.drive_total_min,
                 "Door-to-door": it.door_to_door_cost,
                 "Last Scraped": it.last_scraped.strftime("%b %d %H:%M"),

@@ -124,3 +124,17 @@ def test_identical_season_and_ranked_timelines_do_not_collide(mock_db):
         conn.execute("DELETE FROM avelo_flights WHERE (origin='ILG' AND destination!='TPA') OR (destination='ILG' AND origin!='TPA')")
     at = AppTest.from_file(str(APP), default_timeout=90).run()
     assert not at.exception, at.exception
+
+
+def test_dashboard_labels_follow_the_configured_home_airports(mock_db, monkeypatch):
+    codes = ["PHL", "ILG", "BWI"]
+    monkeypatch.setattr(config, "HOME_CODES", codes)
+    monkeypatch.setattr(config, "HOME_AIRPORTS", {c: config.HOME_AIRPORT_INFO[c] for c in codes})
+    monkeypatch.setattr(config, "PRIMARY_HOME", "PHL")
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    assert not at.exception, at.exception
+
+    assert at.title[0].value == "Flexible Getaways from PHL / ILG / BWI"
+    assert at.sidebar.title[0].value == "✈️ Avelo Getaways"
+    markdown = " ".join(m.value for m in at.markdown)
+    assert "PHL hub" in markdown and "ILG hub" not in markdown

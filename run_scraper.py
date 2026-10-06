@@ -7,7 +7,7 @@ and dates are ever visited.
 
 Examples
 --------
-    python run_scraper.py                                  # all ILG routes, next 60 days
+    python run_scraper.py                                  # every home-airport route, next 60 days
     python run_scraper.py --destinations TPA,LAL --days 30 # two destinations, both directions
     python run_scraper.py --start 2026-10-01 --end 2026-11-15 --mode full
     python run_scraper.py --routes ILG-CHS --headful       # one direction, watch the browser
@@ -91,7 +91,7 @@ def build_command(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Scrape Avelo fares from ILG into SQLite.")
+    p = argparse.ArgumentParser(description="Scrape Avelo fares from your home airports (AVELO_HOME_AIRPORTS) into SQLite.")
     p.add_argument("--start", type=date.fromisoformat, default=date.today(), help="First departure date (YYYY-MM-DD)")
     p.add_argument("--end", type=date.fromisoformat, help="Last departure date, inclusive (overrides --days)")
     p.add_argument("--days", type=int, default=None, help=f"How many days to cover (default {config.DAYS_AHEAD})")

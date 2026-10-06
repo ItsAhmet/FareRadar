@@ -64,7 +64,7 @@ Other useful invocations:
 
 ```bash
 python run_scraper.py --mock                    # synthetic data, no network
-python run_scraper.py                           # every ILG route, next 60 days
+python run_scraper.py                           # every home-airport route, next 60 days
 python run_scraper.py --routes ILG-CHS --headful
 python run_scraper.py --mode full --days 21     # add departure/arrival times per day
 ```
@@ -209,7 +209,7 @@ scrape: departed flights are deleted and price history older than
 streamlit run app.py
 ```
 
-* **System map** at the top: ILG hub with arcs to every selected destination,
+* **System map** at the top: your primary home airport as the hub, with arcs to every selected destination,
   coloured by region; unselected airports stay grey. It redraws as you change
   the selection.
 * **Sidebar**: region checkboxes and Select-all, airport fine-tuning, the

@@ -1,3 +1,8 @@
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 import config
 
 
@@ -35,3 +40,24 @@ def test_default_routes_are_both_directions_from_each_home():
     assert config.default_routes(["chs"], origins=["ILG", "PHL"]) == [
         ("ILG", "CHS"), ("CHS", "ILG"), ("PHL", "CHS"), ("CHS", "PHL")]
     assert len(config.default_routes(origins=["ILG"])) == 32
+
+
+def test_suite_pins_home_airports_regardless_of_owner_settings():
+    # tests/conftest.py sets AVELO_HOME_AIRPORTS before config is imported, so the
+    # owner's real .env / shell value cannot change what the suite sees.
+    assert config.HOME_CODES == ["ILG", "PHL", "BWI"]
+    assert config.PRIMARY_HOME == "ILG"
+
+
+def test_suite_is_hermetic_when_owner_puts_another_home_first():
+    """Many tests hard-code ILG fares and lean on defaults that follow PRIMARY_HOME
+    (GetawayQuery.origin, alerts.watched_routes, the mock generator). Running them
+    in a child pytest whose environment has PHL first must still pass."""
+    root = Path(__file__).resolve().parent.parent
+    env = {**os.environ, "AVELO_OFFLINE": "1", "AVELO_HOME_AIRPORTS": "PHL,ILG,BWI"}
+    files = [f"tests/test_{n}.py" for n in ("alerts", "bookings", "optimizer", "planner", "signals", "run_scraper")]
+    out = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *files],
+        cwd=root, env=env, capture_output=True, text=True, timeout=300,
+    )
+    assert out.returncode == 0, out.stdout[-2000:] + out.stderr[-500:]

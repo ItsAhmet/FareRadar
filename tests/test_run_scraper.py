@@ -38,3 +38,14 @@ def test_build_command_passes_promo_code():
     assert cmd[-2:] == ["--promo", "SAVE20"]
     assert build_parser().parse_args(cmd[2:]).promo == "SAVE20"
     assert "--promo" not in build_command(["CHS"], date(2026, 10, 1), date(2026, 10, 7), promo="  ", python="py")
+
+
+def test_cli_text_describes_all_home_airports_not_a_fixed_origin():
+    import run_scraper
+
+    # with no --routes/--destinations the scraper covers every active home airport...
+    assert len(config.default_routes()) == 2 * len(config.HOME_CODES) * len(config.DESTINATIONS)
+    # ...so the help text and the examples must not claim it only scrapes ILG
+    assert "AVELO_HOME_AIRPORTS" in build_parser().description
+    assert "ILG" not in build_parser().description
+    assert "all ILG routes" not in run_scraper.__doc__
