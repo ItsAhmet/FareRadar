@@ -203,3 +203,14 @@ def test_runs_sightings_floors_and_watchlist(conn):
     db.upsert_flights([flight(day=10, price=50)], conn)
     assert db.get_flight("XP101-ILG-TPA", datetime(2026, 10, 10, 9), conn).price == 50
     assert db.get_flight("nope", datetime(2026, 10, 10, 9), conn) is None
+
+
+def test_route_queries_accept_several_origins(conn):
+    db.upsert_flights([flight(day=10, price=80), flight(origin="PHL", day=10, price=60, number="XP7"),
+                       flight(origin="TPA", dest="PHL", day=12, price=50, number="XP8")], conn)
+    med = db.route_medians(["ILG", "PHL"], ["TPA"], date(2026, 10, 1), date(2026, 10, 31), conn=conn)
+    assert med == {("ILG", "TPA"): 80, ("PHL", "TPA"): 60, ("TPA", "PHL"): 50}
+    s = db.selection_stats(["ILG", "PHL"], ["TPA"], date(2026, 10, 1), date(2026, 10, 31), conn=conn)
+    assert s["flights"] == 3 and s["routes"] == 3
+    fresh = db.route_freshness(["ILG", "PHL"], ["TPA"], conn=conn)
+    assert {(r["origin"], r["destination"]) for r in fresh} == {("ILG", "TPA"), ("PHL", "TPA"), ("TPA", "PHL")}

@@ -432,54 +432,60 @@ def stats(conn: sqlite3.Connection | None = None) -> dict:
     return dict(_fetch(sql, (), conn)[0])
 
 
+def _codes(values: str | Iterable[str]) -> list[str]:
+    """A code or an iterable of codes, upper-cased, order kept."""
+    return [values.upper()] if isinstance(values, str) else [v.upper() for v in values]
+
+
 def selection_stats(
-    origin: str,
+    origins: str | Iterable[str],
     destinations: Iterable[str],
     start_date: date,
     end_date: date,
     conn: sqlite3.Connection | None = None,
 ) -> dict:
     """Coverage of the user's current selection (both directions)."""
-    destinations = [d.upper() for d in destinations]
-    if not destinations:
+    origins, destinations = _codes(origins), [d.upper() for d in destinations]
+    if not destinations or not origins:
         return {"flights": 0, "member_fares": 0, "last_scraped": None, "routes": 0}
-    ph = _placeholders(destinations)
+    po, pd_ = _placeholders(origins), _placeholders(destinations)
     sql = f"""
         SELECT COUNT(*) AS flights,
                SUM(is_member_fare) AS member_fares,
                MAX(timestamp_scraped) AS last_scraped,
                COUNT(DISTINCT origin || '-' || destination) AS routes
         FROM avelo_flights
-        WHERE ((origin = ? AND destination IN ({ph})) OR (destination = ? AND origin IN ({ph})))
+        WHERE ((origin IN ({po}) AND destination IN ({pd_})) OR (destination IN ({po}) AND origin IN ({pd_})))
           AND departure_datetime >= ? AND departure_datetime < ?
     """
-    params = [origin.upper(), *destinations, origin.upper(), *destinations,
+    params = [*origins, *destinations, *origins, *destinations,
               start_date.isoformat(), (end_date + timedelta(days=1)).isoformat()]
     row = dict(_fetch(sql, params, conn)[0])
     row["member_fares"] = row["member_fares"] or 0
     return row
 
 
-def route_freshness(origin: str, destinations: Iterable[str], conn: sqlite3.Connection | None = None) -> list[dict]:
+def route_freshness(
+    origins: str | Iterable[str], destinations: Iterable[str], conn: sqlite3.Connection | None = None
+) -> list[dict]:
     """Per directional route: when it was last scraped and how many fares it holds."""
-    destinations = [d.upper() for d in destinations]
-    if not destinations:
+    origins, destinations = _codes(origins), [d.upper() for d in destinations]
+    if not destinations or not origins:
         return []
-    ph = _placeholders(destinations)
+    po, pd_ = _placeholders(origins), _placeholders(destinations)
     sql = f"""
         SELECT origin, destination, MAX(timestamp_scraped) AS last_scraped, COUNT(*) AS fares,
                MIN(substr(departure_datetime,1,10)) AS first_day, MAX(substr(departure_datetime,1,10)) AS last_day
         FROM avelo_flights
-        WHERE (origin = ? AND destination IN ({ph})) OR (destination = ? AND origin IN ({ph}))
+        WHERE (origin IN ({po}) AND destination IN ({pd_})) OR (destination IN ({po}) AND origin IN ({pd_}))
         GROUP BY origin, destination
-        ORDER BY origin != ?, destination, origin
+        ORDER BY origin NOT IN ({po}), destination, origin
     """
-    o = origin.upper()
-    return [dict(r) for r in _fetch(sql, [o, *destinations, o, *destinations, o], conn)]
+    return [dict(r) for r in _fetch(sql, [*origins, *destinations, *origins, *destinations, *origins], conn)]
 
 
 def route_medians(
-    origin: str,
+    origins: str | Iterable[str],
     destinations: Iterable[str],
     start_date: date,
     end_date: date,
@@ -487,18 +493,18 @@ def route_medians(
 ) -> dict[tuple[str, str], float]:
     """Median current fare per directional route in the span: the 'typical'
     price a package is compared against for its deal score."""
-    destinations = [d.upper() for d in destinations]
-    if not destinations:
+    origins, destinations = _codes(origins), [d.upper() for d in destinations]
+    if not destinations or not origins:
         return {}
-    ph = _placeholders(destinations)
+    po, pd_ = _placeholders(origins), _placeholders(destinations)
     sql = f"""
         SELECT origin, destination, price FROM avelo_flights
-        WHERE ((origin = ? AND destination IN ({ph})) OR (destination = ? AND origin IN ({ph})))
+        WHERE ((origin IN ({po}) AND destination IN ({pd_})) OR (destination IN ({po}) AND origin IN ({pd_})))
           AND departure_datetime >= ? AND departure_datetime < ?
         ORDER BY origin, destination, price
     """
-    o = origin.upper()
-    params = [o, *destinations, o, *destinations, start_date.isoformat(), (end_date + timedelta(days=1)).isoformat()]
+    params = [*origins, *destinations, *origins, *destinations,
+              start_date.isoformat(), (end_date + timedelta(days=1)).isoformat()]
     prices: dict[tuple[str, str], list[float]] = {}
     for r in _fetch(sql, params, conn):
         prices.setdefault((r["origin"], r["destination"]), []).append(r["price"])

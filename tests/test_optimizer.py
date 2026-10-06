@@ -153,7 +153,7 @@ def test_find_itineraries_reads_from_db_and_ignores_other_origins():
 
 def test_dataframe_columns():
     df = to_dataframe(build_itineraries([f("ILG", "TPA", 8, hour=8)], [f("TPA", "ILG", 11, hour=12)], q()))
-    assert list(df.columns[:5]) == ["Rank", "Window", "Destination", "Route Mix", "Out Route"]
+    assert list(df.columns[:6]) == ["Rank", "Window", "Destination", "Home", "Route Mix", "Out Route"]
     assert df.loc[0, "Total Getaway Cost"] == 200
 
 
@@ -255,3 +255,36 @@ def test_sun_and_door_to_door_enrichment_and_ranking():
     assert rank_by_door_to_door(its)[0].destination == "LAL"
     unscored = build_itineraries(outs, backs, q(allow_mix=False))
     assert rank_by_sun(unscored + its)[-1].sun_score is None  # unscored sink to the bottom
+
+
+def test_packages_from_each_home_airport_return_to_the_same_home():
+    flights_out = [f("ILG", "TPA", 8, hour=8), f("PHL", "TPA", 8, hour=9, price=60)]
+    flights_back = [f("TPA", "ILG", 11, hour=15), f("TPA", "PHL", 11, hour=16, price=60)]
+    its = build_itineraries(flights_out, flights_back, q(origins=["ILG", "PHL"]))
+    assert {(i.home_out, i.home_back) for i in its} == {("ILG", "ILG"), ("PHL", "PHL")}
+    assert {i.home_label for i in its} == {"ILG", "PHL"}
+    assert not any(i.is_open_jaw for i in its)
+
+
+def test_open_jaw_toggle_allows_returning_to_another_home():
+    flights_out = [f("ILG", "TPA", 8, hour=8), f("PHL", "TPA", 8, hour=9, price=60)]
+    flights_back = [f("TPA", "ILG", 11, hour=15), f("TPA", "PHL", 11, hour=16, price=60)]
+    its = build_itineraries(flights_out, flights_back, q(origins=["ILG", "PHL"], allow_open_jaw=True))
+    assert len(its) == 4
+    jaw = next(i for i in its if i.home_out == "ILG" and i.home_back == "PHL")
+    assert jaw.is_open_jaw and jaw.home_label == "ILG→PHL"
+
+
+def test_unselected_home_airports_are_ignored():
+    its = build_itineraries([f("PHL", "TPA", 8, hour=9)], [f("TPA", "PHL", 11, hour=16)], q(origins=["ILG"]))
+    assert its == []
+
+
+def test_query_requires_an_origin():
+    with pytest.raises(ValueError):
+        q(origins=[])
+
+
+def test_dataframe_has_home_column():
+    its = build_itineraries([f("PHL", "TPA", 8, hour=9)], [f("TPA", "PHL", 11, hour=16)], q(origins=["PHL"]))
+    assert list(to_dataframe(its)["Home"]) == ["PHL"]

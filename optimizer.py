@@ -154,15 +154,18 @@ BENEFITS = MemberBenefits(**config.MEMBER_BENEFITS)
 class GetawayQuery:
     destinations: set[str]
     windows: list[Window]
-    origin: str = config.PRIMARY_HOME
+    origins: list[str] = field(default_factory=lambda: list(config.HOME_CODES))
     min_nights: int = 1
     max_budget: float | None = None
     allow_mix: bool = True
     max_pair_miles: float = 100.0
+    allow_open_jaw: bool = False  # may a trip return to a different home airport?
 
     def __post_init__(self) -> None:
         self.destinations = {d.upper() for d in self.destinations}
-        self.origin = self.origin.upper()
+        self.origins = list(dict.fromkeys(o.strip().upper() for o in self.origins))
+        if not self.origins:
+            raise ValueError("at least one origin (home airport) is required")
         if self.min_nights < 0:
             raise ValueError("min_nights cannot be negative")
         if not self.windows:
@@ -272,6 +275,24 @@ class Itinerary:
         return airport_name(self.destination)
 
     @property
+    def home_out(self) -> str:
+        """Home airport the trip leaves from."""
+        return self.outbound.origin
+
+    @property
+    def home_back(self) -> str:
+        """Home airport the trip returns to."""
+        return self.inbound.destination
+
+    @property
+    def is_open_jaw(self) -> bool:
+        return self.home_out != self.home_back
+
+    @property
+    def home_label(self) -> str:
+        return f"{self.home_out}→{self.home_back}" if self.is_open_jaw else self.home_out
+
+    @property
     def is_mixed(self) -> bool:
         return self.outbound.destination != self.inbound.origin
 
@@ -350,10 +371,11 @@ def fit_score(out: Flight, back: Flight, w: Window) -> float:
 
 def build_itineraries(outbounds: list[Flight], inbounds: list[Flight], query: GetawayQuery) -> list[Itinerary]:
     """Every valid (outbound, inbound, window) triple, unsorted."""
-    outbounds = [f for f in outbounds if f.origin == query.origin and f.destination in query.destinations]
+    homes = set(query.origins)
+    outbounds = [f for f in outbounds if f.origin in homes and f.destination in query.destinations]
     inbound_by_airport: dict[str, list[Flight]] = defaultdict(list)
     for f in inbounds:
-        if f.destination == query.origin and f.origin in query.destinations:
+        if f.destination in homes and f.origin in query.destinations:
             inbound_by_airport[f.origin].append(f)
 
     # Which airports each arrival airport may be paired with (computed once).
@@ -366,8 +388,10 @@ def build_itineraries(outbounds: list[Flight], inbounds: list[Flight], query: Ge
         for w in query.windows:
             if not outbound_fits(out, w):
                 continue
-            for home_airport in pairable.get(out.destination, ()):
-                for back in inbound_by_airport[home_airport]:
+            for away_airport in pairable.get(out.destination, ()):
+                for back in inbound_by_airport[away_airport]:
+                    if not query.allow_open_jaw and back.destination != out.origin:
+                        continue
                     if not inbound_fits(back, out, w):
                         continue
                     if (back.departure_date - out.departure_date).days < query.min_nights:
@@ -454,12 +478,12 @@ def enrich(
 
 def find_itineraries(query: GetawayQuery, conn: sqlite3.Connection | None = None) -> list[Itinerary]:
     start, end = query.span
-    outbounds = query_flights([query.origin], query.destinations, start, end, conn=conn)
-    inbounds = query_flights(query.destinations, [query.origin], start, end, conn=conn)
+    outbounds = query_flights(query.origins, query.destinations, start, end, conn=conn)
+    inbounds = query_flights(query.destinations, query.origins, start, end, conn=conn)
     itineraries = build_itineraries(outbounds, inbounds, query)
     if not itineraries:
         return itineraries
-    medians = route_medians(query.origin, query.destinations, start, end, conn=conn)
+    medians = route_medians(query.origins, query.destinations, start, end, conn=conn)
     keys = {(f.flight_id, f.departure_datetime) for it in itineraries for f in (it.outbound, it.inbound)}
     return enrich(itineraries, medians, previous_prices(keys, conn=conn))
 
@@ -491,6 +515,7 @@ def to_dataframe(itineraries: list[Itinerary]) -> pd.DataFrame:
                 "Rank": rank,
                 "Window": it.window.label,
                 "Destination": it.destination_city,
+                "Home": it.home_label,
                 "Route Mix": it.route_mix,
                 "Out Route": it.outbound.route,
                 "Out Date": it.outbound.departure_datetime.strftime("%a %b %d"),
