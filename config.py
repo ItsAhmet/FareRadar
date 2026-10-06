@@ -1,9 +1,9 @@
-"""Central configuration: the ILG hub, every nonstop destination, scraper tunables.
+"""Central configuration: home airports, every nonstop destination, scraper tunables.
 
-Origin is fixed to Wilmington, DE (ILG). Destinations are grouped by region for
+Home airports (ILG, PHL, BWI) are where trips start and end; which ones are
+active comes from AVELO_HOME_AIRPORTS. Destinations are grouped by region for
 the sidebar and the map, and carry coordinates so the optimizer can decide
-whether two airports are close enough to mix-and-match (fly into one, home
-from another).
+whether two airports are close enough to mix-and-match.
 """
 from __future__ import annotations
 
@@ -38,8 +38,46 @@ class Airport:
         return f"{self.code} · {self.city}"
 
 
-ORIGIN = "ILG"
-ORIGIN_AIRPORT = Airport("ILG", "Wilmington, DE", "Hub", 39.6787, -75.6065)
+@dataclass(frozen=True)
+class HomeCost:
+    """Owner-set cost of starting a trip at a home airport."""
+
+    drive_min: float | None = None  # minutes from your home; None = not set, not counted
+    parking_per_day: float = 0.0
+
+
+HOME_AIRPORT_INFO: dict[str, Airport] = {
+    a.code: a
+    for a in (
+        Airport("ILG", "Wilmington, DE", "Home", 39.6787, -75.6065),
+        Airport("PHL", "Philadelphia", "Home", 39.8744, -75.2424),
+        Airport("BWI", "Baltimore", "Home", 39.1754, -76.6683),
+    )
+}
+
+# Parking defaults are estimates the owner can change in the dashboard (settings table).
+DEFAULT_HOME_COSTS: dict[str, HomeCost] = {
+    "ILG": HomeCost(None, 0.0),
+    "PHL": HomeCost(None, 17.0),
+    "BWI": HomeCost(None, 14.0),
+}
+
+
+def parse_home_codes(raw: str) -> list[str]:
+    """Known home codes from a comma list, in order, de-duplicated; ILG if none."""
+    codes = [c.strip().upper() for c in (raw or "").split(",") if c.strip()]
+    known = [c for c in dict.fromkeys(codes) if c in HOME_AIRPORT_INFO]
+    return known or ["ILG"]
+
+
+HOME_CODES: list[str] = parse_home_codes(os.getenv("AVELO_HOME_AIRPORTS", "ILG,PHL,BWI"))
+HOME_AIRPORTS: dict[str, Airport] = {c: HOME_AIRPORT_INFO[c] for c in HOME_CODES}
+PRIMARY_HOME: str = HOME_CODES[0]
+
+
+def is_home(code: str) -> bool:
+    return code.strip().upper() in HOME_AIRPORT_INFO
+
 
 # Every nonstop Avelo destination from ILG, grouped by region. Order matters:
 # it is the order regions and airports appear in the UI and on the map legend.
@@ -81,7 +119,7 @@ REGION_COLORS: dict[str, tuple[int, int, int]] = {
 HUB_COLOR: tuple[int, int, int] = (31, 41, 55)
 INACTIVE_COLOR: tuple[int, int, int] = (176, 183, 195)
 
-ALL_AIRPORTS: dict[str, Airport] = {ORIGIN: ORIGIN_AIRPORT, **DESTINATIONS}
+ALL_AIRPORTS: dict[str, Airport] = {**HOME_AIRPORT_INFO, **DESTINATIONS}
 
 
 def region_codes(region: str) -> list[str]:
@@ -105,13 +143,16 @@ def distance_miles(a: str, b: str) -> float:
     return 3958.8 * 2 * math.asin(math.sqrt(h))
 
 
-def default_routes(destinations: list[str] | None = None) -> list[tuple[str, str]]:
-    """ILG→dest and dest→ILG for each destination (all of them by default)."""
+def default_routes(destinations: list[str] | None = None, origins: list[str] | None = None) -> list[tuple[str, str]]:
+    """home→dest and dest→home for each destination and each home airport
+    (all destinations and all active home airports by default)."""
     routes: list[tuple[str, str]] = []
     for code in destinations or list(DESTINATIONS):
         code = code.upper()
-        routes.append((ORIGIN, code))
-        routes.append((code, ORIGIN))
+        for home in origins or HOME_CODES:
+            home = home.upper()
+            routes.append((home, code))
+            routes.append((code, home))
     return routes
 
 

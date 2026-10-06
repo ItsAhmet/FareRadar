@@ -34,7 +34,7 @@ import random
 import pandas as pd
 
 import config
-from config import DESTINATIONS, ORIGIN, airport_name, distance_miles
+from config import DESTINATIONS, airport_name, distance_miles
 from holidays import holidays_between
 from database import previous_prices, query_flights, route_medians
 from models import Flight
@@ -154,7 +154,7 @@ BENEFITS = MemberBenefits(**config.MEMBER_BENEFITS)
 class GetawayQuery:
     destinations: set[str]
     windows: list[Window]
-    origin: str = ORIGIN
+    origin: str = config.PRIMARY_HOME
     min_nights: int = 1
     max_budget: float | None = None
     allow_mix: bool = True

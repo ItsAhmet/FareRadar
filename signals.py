@@ -42,7 +42,7 @@ class Event:
 
 
 def _label(origin: str, destination: str) -> str:
-    return f"{origin}→{destination} ({airport_name(destination) if origin == config.ORIGIN else airport_name(origin)})"
+    return f"{origin}→{destination} ({airport_name(destination) if config.is_home(origin) else airport_name(origin)})"
 
 
 def detect_route(

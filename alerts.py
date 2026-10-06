@@ -173,8 +173,8 @@ def watched_routes(conn: sqlite3.Connection | None = None) -> set[tuple[str, str
         p = watch["payload"]
         if watch["kind"] == "rule":
             for d in p.get("destinations", []):
-                routes.add((config.ORIGIN, d))
-                routes.add((d, config.ORIGIN))
+                routes.add((config.PRIMARY_HOME, d))
+                routes.add((d, config.PRIMARY_HOME))
         else:
             out_id, in_id = p.get("out_id", ""), p.get("in_id", "")
             for fid in (out_id, in_id):

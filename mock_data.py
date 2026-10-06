@@ -11,7 +11,7 @@ from __future__ import annotations
 import random
 from datetime import date, datetime, time, timedelta
 
-from config import DESTINATIONS, ORIGIN, default_routes
+from config import DESTINATIONS, PRIMARY_HOME, default_routes
 from models import Flight
 
 # weekday numbers: Mon=0 … Sun=6
@@ -41,7 +41,7 @@ MEMBER_DISCOUNT = 40.0
 def _duration(dest: str) -> int:
     from config import distance_miles
 
-    return int(35 + distance_miles(ORIGIN, dest) / 7.6)  # taxi + ~455 mph
+    return int(35 + distance_miles(PRIMARY_HOME, dest) / 7.6)  # taxi + ~455 mph
 
 
 def _public_price(day: date, today: date, rng: random.Random) -> float:
@@ -55,7 +55,7 @@ def _public_price(day: date, today: date, rng: random.Random) -> float:
 
 def scheduled_days(origin: str, dest: str, dates: list[date]) -> list[date]:
     """Days in `dates` on which the mock schedule flies this route."""
-    far = dest if origin == ORIGIN else origin
+    far = dest if origin == PRIMARY_HOME else origin
     weekdays = ROUTE_DAYS.get(far, {3, 6})
     return [d for d in dates if d.weekday() in weekdays]
 
@@ -74,7 +74,9 @@ def generate_mock_flights(
     flights: list[Flight] = []
 
     for origin, dest in routes:
-        outbound = origin == ORIGIN
+        if PRIMARY_HOME not in (origin, dest):
+            continue
+        outbound = origin == PRIMARY_HOME
         far = dest if outbound else origin
         if far not in DESTINATIONS:
             continue

@@ -68,7 +68,7 @@ def _db_version() -> float:
 
 @st.cache_data(show_spinner=False)
 def load_selection_stats(destinations: tuple[str, ...], start: date, end: date, _version: float) -> dict:
-    return database.selection_stats(config.ORIGIN, list(destinations), start, end)
+    return database.selection_stats(config.PRIMARY_HOME, list(destinations), start, end)
 
 
 @st.cache_data(show_spinner=False)
@@ -78,7 +78,7 @@ def load_calendar(start: date, end: date, _version: float) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def load_freshness(destinations: tuple[str, ...], _version: float) -> pd.DataFrame:
-    return pd.DataFrame(database.route_freshness(config.ORIGIN, list(destinations)))
+    return pd.DataFrame(database.route_freshness(config.PRIMARY_HOME, list(destinations)))
 
 
 @st.cache_data(show_spinner=False)
@@ -239,7 +239,7 @@ def availability_picker() -> tuple[Availability, Availability | None, bool]:
 
 def sidebar() -> tuple[GetawayQuery | None, list[str], tuple[date, date], str, dict]:
     st.sidebar.title("✈️ ILG Getaways")
-    st.sidebar.caption(f"Nonstop on Avelo from {config.ORIGIN_AIRPORT.city}")
+    st.sidebar.caption(f"Nonstop on Avelo from {config.HOME_AIRPORTS[config.PRIMARY_HOME].city}")
 
     today = date.today()
     if st.sidebar.button("⚡ This weekend", help="Next 5 days, every destination, scrape now", width="stretch"):
@@ -396,7 +396,7 @@ def scraper_panel(destinations: list[str], start: date, end: date) -> dict:
     routes = len(destinations) * 2
     days = (end - start).days + 1
     st.sidebar.caption(
-        f"Target: {routes} routes × {days} days · {config.ORIGIN} ⇄ {', '.join(destinations) or '—'}"
+        f"Target: {routes} routes × {days} days · {config.PRIMARY_HOME} ⇄ {', '.join(destinations) or '—'}"
         + (f" · promo {promo}" if promo else "")
     )
 
@@ -470,7 +470,7 @@ def scrape_monitor() -> None:
 
 
 def system_map(selected: list[str]) -> None:
-    hub = config.ORIGIN_AIRPORT
+    hub = config.HOME_AIRPORTS[config.PRIMARY_HOME]
     chosen = set(selected)
     points = [
         {
@@ -875,8 +875,8 @@ def calendar_heatmap(cal: pd.DataFrame, destinations: list[str], span: tuple[dat
     if cal.empty:
         st.info("No fares in this span to draw a calendar for.")
         return
-    out = cal[(cal.origin == config.ORIGIN) & cal.destination.isin(destinations)]
-    back = cal[(cal.destination == config.ORIGIN) & cal.origin.isin(destinations)]
+    out = cal[(cal.origin == config.PRIMARY_HOME) & cal.destination.isin(destinations)]
+    back = cal[(cal.destination == config.PRIMARY_HOME) & cal.origin.isin(destinations)]
     sub = pd.concat([out, back])
     if sub.empty:
         st.info("No fares for the selected destinations in this span.")
@@ -978,7 +978,7 @@ def main() -> None:
     horizon = date.today() + timedelta(days=16)
     if any(it.outbound.departure_date <= horizon for it in itins):
         codes = {it.destination for it in itins if it.outbound.departure_date <= horizon}
-        enrich_weather(itins, {c: load_forecast_all(c) for c in codes}, load_forecast_all(config.ORIGIN))
+        enrich_weather(itins, {c: load_forecast_all(c) for c in codes}, load_forecast_all(config.PRIMARY_HOME))
     pm = st.session_state.get("place_mode") or {}
     if pm.get("place"):
         enrich_drives(itins, {c: m for c, (m, _src) in pm["drives"].items()}, pm["value"])

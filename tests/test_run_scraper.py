@@ -15,7 +15,7 @@ def test_build_command_carries_ui_filters_verbatim():
     ]
     # and the CLI parses that command back into the same targets
     args = build_parser().parse_args(cmd[2:])
-    routes = config.default_routes(parse_destinations(args.destinations))
+    routes = config.default_routes(parse_destinations(args.destinations), origins=["ILG"])
     assert routes == [("ILG", "TPA"), ("TPA", "ILG"), ("ILG", "LAL"), ("LAL", "ILG")]
     dates = build_dates(args.start, args.end, args.days)
     assert dates[0] == date(2026, 10, 1) and dates[-1] == date(2026, 10, 31) and len(dates) == 31
