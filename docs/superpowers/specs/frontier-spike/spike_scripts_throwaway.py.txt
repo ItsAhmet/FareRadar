@@ -1,0 +1,110 @@
+"""THROWAWAY spike: can Playwright read Frontier PHL->MCO fares? Not app code."""
+import asyncio, json, random, sys
+sys.path.insert(0, "/Users/ahmetyesilbas/avelo-finder")
+import config
+from playwright.async_api import async_playwright
+
+OUT = "/private/tmp/claude-501/-Users-ahmetyesilbas-Desktop-avelo-finder/e3a92706-91b7-47db-8628-0eaaabe88833/scratchpad/frontier"
+URL = ("https://booking.flyfrontier.com/Flight/InternalSelect?o1=PHL&d1=MCO"
+       "&dd1=Nov%2012%2C%202026&ADT=1&mon=true&promo=")
+
+
+async def probe(headless: bool) -> dict:
+    tag = "headless" if headless else "headful"
+    async with async_playwright() as pw:
+        b = await pw.chromium.launch(headless=headless, args=list(config.BROWSER_ARGS))
+        ctx = await b.new_context(user_agent=random.choice(config.USER_AGENTS),
+                                  viewport=dict(zip(("width", "height"), (1440, 900))), locale="en-US")
+        await ctx.add_init_script(config.STEALTH_INIT_SCRIPT)
+        page = await ctx.new_page()
+        xhr = []
+        page.on("response", lambda r: xhr.append((r.status, r.url[:140], r.headers.get("content-type", "")))
+                if r.request.resource_type in ("xhr", "fetch", "document") else None)
+        res = {"mode": tag}
+        try:
+            # land on home page first like a human, then the search URL
+            r0 = await page.goto("https://www.flyfrontier.com/", wait_until="domcontentloaded", timeout=45000)
+            res["home_status"] = r0.status if r0 else None
+            await page.wait_for_timeout(4000)
+            r = await page.goto(URL, wait_until="domcontentloaded", timeout=60000)
+            res["search_status"] = r.status if r else None
+            await page.wait_for_timeout(12000)
+            html = await page.content()
+            res["final_url"] = page.url
+            res["title"] = await page.title()
+            low = html.lower()
+            res["blocked_markers"] = [m for m in ("px-captcha", "press & hold", "perimeterx", "access denied",
+                                                  "_incapsula", "captcha", "are you a robot", "akamai")
+                                      if m in low]
+            res["fare_markers"] = [m for m in ("discount den", "den", "standard", "$") if m in low][:4]
+            res["dollar_count"] = html.count("$")
+            res["html_len"] = len(html)
+            open(f"{OUT}_{tag}.html", "w").write(html)
+            await page.screenshot(path=f"{OUT}_{tag}.png", full_page=False)
+        except Exception as e:  # spike: record and move on
+            res["error"] = repr(e)[:300]
+        res["xhr"] = [x for x in xhr if "flyfrontier" in x[1]][:25]
+        await b.close()
+        return res
+
+
+async def main():
+    modes = [True] if "--headful" not in sys.argv else [False]
+    for h in modes:
+        print(json.dumps(await probe(h), indent=1))
+
+asyncio.run(main())
+"""THROWAWAY spike 2: calendar view, BWI route, in-page JSON read."""
+import asyncio, json, random, sys, time
+sys.path.insert(0, "/Users/ahmetyesilbas/avelo-finder")
+import config
+from playwright.async_api import async_playwright
+SP="/private/tmp/claude-501/-Users-ahmetyesilbas-Desktop-avelo-finder/e3a92706-91b7-47db-8628-0eaaabe88833/scratchpad"
+B="https://booking.flyfrontier.com/Flight/InternalSelect?"
+URLS={"cal_PHL_MCO": B+"o1=PHL&d1=MCO&dd1=Nov%2012%2C%202026&c=true&mon=true&ADT=1&promo=",
+      "day_BWI_TPA": B+"o1=BWI&d1=TPA&dd1=Nov%2013%2C%202026&ADT=1&mon=true&promo=",
+      "day_MCO_PHL": B+"o1=MCO&d1=PHL&dd1=Nov%2015%2C%202026&ADT=1&mon=true&promo="}
+async def main():
+    async with async_playwright() as pw:
+        b=await pw.chromium.launch(headless=True,args=list(config.BROWSER_ARGS))
+        ctx=await b.new_context(user_agent=random.choice(config.USER_AGENTS),viewport={"width":1440,"height":900},locale="en-US")
+        await ctx.add_init_script(config.STEALTH_INIT_SCRIPT)
+        page=await ctx.new_page()
+        await page.goto("https://www.flyfrontier.com/",wait_until="domcontentloaded",timeout=45000); await page.wait_for_timeout(3000)
+        for name,u in URLS.items():
+            t=time.monotonic(); r=await page.goto(u,wait_until="domcontentloaded",timeout=60000)
+            try: await page.wait_for_function("window.FlightDataJson && window.FlightDataJson.journeys", timeout=30000)
+            except Exception as e: print(name,"no FlightDataJson",page.url, await page.title()); open(f"{SP}/f_{name}.html","w").write(await page.content()); continue
+            d=await page.evaluate("JSON.parse(JSON.stringify(window.FlightDataJson))")
+            json.dump(d,open(f"{SP}/f_{name}.json","w"))
+            j=d["journeys"][0]; fl=j.get("flights") or []
+            non=[f for f in fl if f.get("stopCount")==0]
+            print(f"\n{name}: status={r.status if r else None} url={page.url[:80]} secs={time.monotonic()-t:.1f}")
+            print("  flights",len(fl),"nonstop",len(non),"lowestDD",d.get("lowestDDAmount"),"lowestStd",d.get("lowestStandardAmount"))
+            for f in non[:4]:
+                leg=f["legs"][0]; print("  ", {k:leg.get(k) for k in list(leg)[:8]}, "DD",f["discountDenFare"],"STD",f["standardFare"])
+            cs=d.get("calendarSections"); 
+            if cs: print("  calendarSections:", type(cs).__name__, len(cs), json.dumps(cs)[:600])
+            await page.wait_for_timeout(random.randint(4000,8000))
+        await b.close()
+asyncio.run(main())
+"""THROWAWAY spike 3: capture the low-fare calendar XHR."""
+import asyncio, json, random, sys
+sys.path.insert(0, "/Users/ahmetyesilbas/avelo-finder")
+import config
+from playwright.async_api import async_playwright
+SP="/private/tmp/claude-501/-Users-ahmetyesilbas-Desktop-avelo-finder/e3a92706-91b7-47db-8628-0eaaabe88833/scratchpad"
+U="https://booking.flyfrontier.com/Flight/InternalSelect?o1=PHL&d1=MCO&dd1=Nov%2012%2C%202026&c=true&mon=true&ADT=1&promo="
+async def main():
+    async with async_playwright() as pw:
+        b=await pw.chromium.launch(headless=True,args=list(config.BROWSER_ARGS))
+        ctx=await b.new_context(user_agent=random.choice(config.USER_AGENTS),viewport={"width":1440,"height":900},locale="en-US")
+        await ctx.add_init_script(config.STEALTH_INIT_SCRIPT); page=await ctx.new_page()
+        await page.goto("https://www.flyfrontier.com/",wait_until="domcontentloaded",timeout=45000); await page.wait_for_timeout(3000)
+        async with page.expect_response(lambda r: "GetLowFareCalendarAvailability" in r.url, timeout=45000) as info:
+            await page.goto(U, wait_until="domcontentloaded", timeout=60000)
+        r=await info.value; print("status",r.status,r.request.method,r.url[:160]); print("req body:", (r.request.post_data or "")[:300])
+        ct=r.headers.get("content-type",""); print("ctype",ct)
+        body=await r.text(); open(f"{SP}/f_calendar_xhr.txt","w").write(body); print("len",len(body)); print(body[:1500])
+        await b.close()
+asyncio.run(main())

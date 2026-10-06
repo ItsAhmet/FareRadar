@@ -1,0 +1,21 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+data/*.db
+data/*.db-journal
+data/screenshots/
+.pytest_cache/
+data/browser_state.json
+data/scrape.log
+data/scheduled.log
+
+data/streamlit.pid
+data/streamlit.log
+
+# OS / SQLite WAL / runtime
+.DS_Store
+data/*.db-wal
+data/*.db-shm
+data/scrape.lock
+.superpowers/

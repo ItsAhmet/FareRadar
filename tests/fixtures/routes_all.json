@@ -1,0 +1,800 @@
+[
+ {
+  "Code": "HVN",
+  "Description": "New Haven, CT",
+  "Locations": {
+   "Items": [
+    {
+     "Days": {
+      "Items": [
+       {
+        "Code": "2026-08-31"
+       },
+       {
+        "Code": "2026-09-02"
+       },
+       {
+        "Code": "2026-09-04"
+       },
+       {
+        "Code": "2026-09-05"
+       },
+       {
+        "Code": "2026-09-07"
+       },
+       {
+        "Code": "2026-09-09"
+       },
+       {
+        "Code": "2026-09-11"
+       },
+       {
+        "Code": "2026-09-12"
+       }
+      ]
+     },
+     "CityName": "Fort Myers",
+     "Country": {
+      "Continent": "NA",
+      "Code": "US",
+      "Description": "United States"
+     },
+     "Latitude": {
+      "DecimalDegrees": 27
+     },
+     "Longitude": {
+      "DecimalDegrees": -82
+     },
+     "RegionState": {
+      "CountryCode": "US",
+      "Code": "FL",
+      "Description": "Florida"
+     },
+     "Code": "RSW",
+     "Description": "Fort Myers, FL",
+     "TypeCode": "Destination"
+    },
+    {
+     "Days": {
+      "Items": [
+       {
+        "Code": "2026-08-31"
+       },
+       {
+        "Code": "2026-09-04"
+       },
+       {
+        "Code": "2026-09-07"
+       },
+       {
+        "Code": "2026-09-11"
+       },
+       {
+        "Code": "2026-09-14"
+       },
+       {
+        "Code": "2026-09-18"
+       },
+       {
+        "Code": "2026-09-21"
+       },
+       {
+        "Code": "2026-09-25"
+       }
+      ]
+     },
+     "CityName": "Sarasota",
+     "Country": {
+      "Continent": "NA",
+      "Code": "US",
+      "Description": "United States"
+     },
+     "Latitude": {
+      "DecimalDegrees": 27
+     },
+     "Longitude": {
+      "DecimalDegrees": -83
+     },
+     "RegionState": {
+      "CountryCode": "US",
+      "Code": "FL",
+      "Description": "Florida"
+     },
+     "Code": "SRQ",
+     "Description": "Sarasota / Bradenton, FL",
+     "TypeCode": "Destination"
+    },
+    {
+     "Days": {
+      "Items": [
+       {
+        "Code": "2026-08-31"
+       },
+       {
+        "Code": "2026-09-02"
+       },
+       {
+        "Code": "2026-09-03"
+       },
+       {
+        "Code": "2026-09-04"
+       },
+       {
+        "Code": "2026-09-05"
+       },
+       {
+        "Code": "2026-09-06"
+       },
+       {
+        "Code": "2026-09-07"
+       },
+       {
+        "Code": "2026-09-09"
+       }
+      ]
+     },
+     "CityName": "Tampa",
+     "Country": {
+      "Continent": "NA",
+      "Code": "US",
+      "Description": "United States"
+     },
+     "Latitude": {
+      "DecimalDegrees": 28
+     },
+     "Longitude": {
+      "DecimalDegrees": -83
+     },
+     "RegionState": {
+      "CountryCode": "US",
+      "Code": "FL",
+      "Description": "Florida"
+     },
+     "Code": "TPA",
+     "Description": "Tampa, FL",
+     "TypeCode": "Destination"
+    }
+   ]
+  }
+ },
+ {
+  "Code": "ILG",
+  "Description": "Philadelphia / Wilmington, DE",
+  "Locations": {
+   "Items": [
+    {
+     "Days": {
+      "Items": [
+       {
+        "Code": "2026-08-31"
+       },
+       {
+        "Code": "2026-09-03"
+       },
+       {
+        "Code": "2026-09-04"
+       },
+       {
+        "Code": "2026-09-06"
+       },
+       {
+        "Code": "2026-09-07"
+       },
+       {
+        "Code": "2026-09-10"
+       },
+       {
+        "Code": "2026-09-13"
+       },
+       {
+        "Code": "2026-09-17"
+       }
+      ]
+     },
+     "CityName": "Fort Myers",
+     "Country": {
+      "Continent": "NA",
+      "Code": "US",
+      "Description": "United States"
+     },
+     "Latitude": {
+      "DecimalDegrees": 27
+     },
+     "Longitude": {
+      "DecimalDegrees": -82
+     },
+     "RegionState": {
+      "CountryCode": "US",
+      "Code": "FL",
+      "Description": "Florida"
+     },
+     "Code": "RSW",
+     "Description": "Fort Myers, FL",
+     "TypeCode": "Destination"
+    },
+    {
+     "Days": {
+      "Items": [
+       {
+        "Code": "2026-11-19"
+       },
+       {
+        "Code": "2026-11-22"
+       },
+       {
+        "Code": "2026-11-24"
+       },
+       {
+        "Code": "2026-11-29"
+       },
+       {
+        "Code": "2026-12-03"
+       },
+       {
+        "Code": "2026-12-06"
+       },
+       {
+        "Code": "2026-12-10"
+       },
+       {
+        "Code": "2026-12-13"
+       }
+      ]
+     },
+     "CityName": "Sarasota",
+     "Country": {
+      "Continent": "NA",
+      "Code": "US",
+      "Description": "United States"
+     },
+     "Latitude": {
+      "DecimalDegrees": 27
+     },
+     "Longitude": {
+      "DecimalDegrees": -83
+     },
+     "RegionState": {
+      "CountryCode": "US",
+      "Code": "FL",
+      "Description": "Florida"
+     },
+     "Code": "SRQ",
+     "Description": "Sarasota / Bradenton, FL",
+     "TypeCode": "Destination"
+    },
+    {
+     "Days": {
+      "Items": [
+       {
+        "Code": "2026-08-31"
+       },
+       {
+        "Code": "2026-09-02"
+       },
+       {
+        "Code": "2026-09-04"
+       },
+       {
+        "Code": "2026-09-05"
+       },
+       {
+        "Code": "2026-09-07"
+       },
+       {
+        "Code": "2026-09-09"
+       },
+       {
+        "Code": "2026-09-11"
+       },
+       {
+        "Code": "2026-09-12"
+       }
+      ]
+     },
+     "CityName": "Tampa",
+     "Country": {
+      "Continent": "NA",
+      "Code": "US",
+      "Description": "United States"
+     },
+     "Latitude": {
+      "DecimalDegrees": 28
+     },
+     "Longitude": {
+      "DecimalDegrees": -83
+     },
+     "RegionState": {
+      "CountryCode": "US",
+      "Code": "FL",
+      "Description": "Florida"
+     },
+     "Code": "TPA",
+     "Description": "Tampa, FL",
+     "TypeCode": "Destination"
+    }
+   ]
+  }
+ },
+ {
+  "Code": "ILG",
+  "Description": "Wilmington, DE / Philadelphia",
+  "Locations": {
+   "Items": [
+    {
+     "Days": {
+      "Items": [
+       {
+        "Code": "2026-08-31"
+       },
+       {
+        "Code": "2026-09-03"
+       },
+       {
+        "Code": "2026-09-04"
+       },
+       {
+        "Code": "2026-09-06"
+       },
+       {
+        "Code": "2026-09-07"
+       },
+       {
+        "Code": "2026-09-10"
+       },
+       {
+        "Code": "2026-09-13"
+       },
+       {
+        "Code": "2026-09-17"
+       }
+      ]
+     },
+     "CityName": "Fort Myers",
+     "Country": {
+      "Continent": "NA",
+      "Code": "US",
+      "Description": "United States"
+     },
+     "Latitude": {
+      "DecimalDegrees": 27
+     },
+     "Longitude": {
+      "DecimalDegrees": -82
+     },
+     "RegionState": {
+      "CountryCode": "US",
+      "Code": "FL",
+      "Description": "Florida"
+     },
+     "Code": "RSW",
+     "Description": "Fort Myers, FL",
+     "TypeCode": "Destination"
+    },
+    {
+     "Days": {
+      "Items": [
+       {
+        "Code": "2026-11-19"
+       },
+       {
+        "Code": "2026-11-22"
+       },
+       {
+        "Code": "2026-11-24"
+       },
+       {
+        "Code": "2026-11-29"
+       },
+       {
+        "Code": "2026-12-03"
+       },
+       {
+        "Code": "2026-12-06"
+       },
+       {
+        "Code": "2026-12-10"
+       },
+       {
+        "Code": "2026-12-13"
+       }
+      ]
+     },
+     "CityName": "Sarasota",
+     "Country": {
+      "Continent": "NA",
+      "Code": "US",
+      "Description": "United States"
+     },
+     "Latitude": {
+      "DecimalDegrees": 27
+     },
+     "Longitude": {
+      "DecimalDegrees": -83
+     },
+     "RegionState": {
+      "CountryCode": "US",
+      "Code": "FL",
+      "Description": "Florida"
+     },
+     "Code": "SRQ",
+     "Description": "Sarasota / Bradenton, FL",
+     "TypeCode": "Destination"
+    },
+    {
+     "Days": {
+      "Items": [
+       {
+        "Code": "2026-08-31"
+       },
+       {
+        "Code": "2026-09-02"
+       },
+       {
+        "Code": "2026-09-04"
+       },
+       {
+        "Code": "2026-09-05"
+       },
+       {
+        "Code": "2026-09-07"
+       },
+       {
+        "Code": "2026-09-09"
+       },
+       {
+        "Code": "2026-09-11"
+       },
+       {
+        "Code": "2026-09-12"
+       }
+      ]
+     },
+     "CityName": "Tampa",
+     "Country": {
+      "Continent": "NA",
+      "Code": "US",
+      "Description": "United States"
+     },
+     "Latitude": {
+      "DecimalDegrees": 28
+     },
+     "Longitude": {
+      "DecimalDegrees": -83
+     },
+     "RegionState": {
+      "CountryCode": "US",
+      "Code": "FL",
+      "Description": "Florida"
+     },
+     "Code": "TPA",
+     "Description": "Tampa, FL",
+     "TypeCode": "Destination"
+    }
+   ]
+  }
+ },
+ {
+  "Code": "RSW",
+  "Description": "Fort Myers, FL",
+  "Locations": {
+   "Items": [
+    {
+     "Days": {
+      "Items": [
+       {
+        "Code": "2026-08-31"
+       },
+       {
+        "Code": "2026-09-02"
+       },
+       {
+        "Code": "2026-09-04"
+       },
+       {
+        "Code": "2026-09-05"
+       },
+       {
+        "Code": "2026-09-07"
+       },
+       {
+        "Code": "2026-09-09"
+       },
+       {
+        "Code": "2026-09-11"
+       },
+       {
+        "Code": "2026-09-12"
+       }
+      ]
+     },
+     "CityName": "New Haven",
+     "Country": {
+      "Continent": "NA",
+      "Code": "US",
+      "Description": "United States"
+     },
+     "Latitude": {
+      "DecimalDegrees": 41
+     },
+     "Longitude": {
+      "DecimalDegrees": -73
+     },
+     "RegionState": {
+      "CountryCode": "US",
+      "Code": "CT",
+      "Description": "Connecticut"
+     },
+     "Code": "HVN",
+     "Description": "New Haven, CT",
+     "TypeCode": "Destination"
+    },
+    {
+     "Days": {
+      "Items": [
+       {
+        "Code": "2026-08-31"
+       },
+       {
+        "Code": "2026-09-03"
+       },
+       {
+        "Code": "2026-09-04"
+       },
+       {
+        "Code": "2026-09-06"
+       },
+       {
+        "Code": "2026-09-07"
+       },
+       {
+        "Code": "2026-09-10"
+       },
+       {
+        "Code": "2026-09-13"
+       },
+       {
+        "Code": "2026-09-17"
+       }
+      ]
+     },
+     "CityName": "Wilmington",
+     "Country": {
+      "Continent": "NA",
+      "Code": "US",
+      "Description": "United States"
+     },
+     "Latitude": {
+      "DecimalDegrees": 40
+     },
+     "Longitude": {
+      "DecimalDegrees": -76
+     },
+     "RegionState": {
+      "CountryCode": "US",
+      "Code": "DE",
+      "Description": "Delaware"
+     },
+     "Code": "ILG",
+     "Description": "Philadelphia / Wilmington, DE",
+     "TypeCode": "Destination"
+    }
+   ]
+  }
+ },
+ {
+  "Code": "SRQ",
+  "Description": "Sarasota / Bradenton, FL",
+  "Locations": {
+   "Items": [
+    {
+     "Days": {
+      "Items": [
+       {
+        "Code": "2026-08-31"
+       },
+       {
+        "Code": "2026-09-04"
+       },
+       {
+        "Code": "2026-09-07"
+       },
+       {
+        "Code": "2026-09-11"
+       },
+       {
+        "Code": "2026-09-14"
+       },
+       {
+        "Code": "2026-09-18"
+       },
+       {
+        "Code": "2026-09-21"
+       },
+       {
+        "Code": "2026-09-25"
+       }
+      ]
+     },
+     "CityName": "New Haven",
+     "Country": {
+      "Continent": "NA",
+      "Code": "US",
+      "Description": "United States"
+     },
+     "Latitude": {
+      "DecimalDegrees": 41
+     },
+     "Longitude": {
+      "DecimalDegrees": -73
+     },
+     "RegionState": {
+      "CountryCode": "US",
+      "Code": "CT",
+      "Description": "Connecticut"
+     },
+     "Code": "HVN",
+     "Description": "New Haven, CT",
+     "TypeCode": "Destination"
+    },
+    {
+     "Days": {
+      "Items": [
+       {
+        "Code": "2026-11-19"
+       },
+       {
+        "Code": "2026-11-22"
+       },
+       {
+        "Code": "2026-11-24"
+       },
+       {
+        "Code": "2026-11-29"
+       },
+       {
+        "Code": "2026-12-03"
+       },
+       {
+        "Code": "2026-12-06"
+       },
+       {
+        "Code": "2026-12-10"
+       },
+       {
+        "Code": "2026-12-13"
+       }
+      ]
+     },
+     "CityName": "Wilmington",
+     "Country": {
+      "Continent": "NA",
+      "Code": "US",
+      "Description": "United States"
+     },
+     "Latitude": {
+      "DecimalDegrees": 40
+     },
+     "Longitude": {
+      "DecimalDegrees": -76
+     },
+     "RegionState": {
+      "CountryCode": "US",
+      "Code": "DE",
+      "Description": "Delaware"
+     },
+     "Code": "ILG",
+     "Description": "Philadelphia / Wilmington, DE",
+     "TypeCode": "Destination"
+    }
+   ]
+  }
+ },
+ {
+  "Code": "TPA",
+  "Description": "Tampa, FL",
+  "Locations": {
+   "Items": [
+    {
+     "Days": {
+      "Items": [
+       {
+        "Code": "2026-08-31"
+       },
+       {
+        "Code": "2026-09-02"
+       },
+       {
+        "Code": "2026-09-03"
+       },
+       {
+        "Code": "2026-09-04"
+       },
+       {
+        "Code": "2026-09-05"
+       },
+       {
+        "Code": "2026-09-06"
+       },
+       {
+        "Code": "2026-09-07"
+       },
+       {
+        "Code": "2026-09-09"
+       }
+      ]
+     },
+     "CityName": "New Haven",
+     "Country": {
+      "Continent": "NA",
+      "Code": "US",
+      "Description": "United States"
+     },
+     "Latitude": {
+      "DecimalDegrees": 41
+     },
+     "Longitude": {
+      "DecimalDegrees": -73
+     },
+     "RegionState": {
+      "CountryCode": "US",
+      "Code": "CT",
+      "Description": "Connecticut"
+     },
+     "Code": "HVN",
+     "Description": "New Haven, CT",
+     "TypeCode": "Destination"
+    },
+    {
+     "Days": {
+      "Items": [
+       {
+        "Code": "2026-08-31"
+       },
+       {
+        "Code": "2026-09-02"
+       },
+       {
+        "Code": "2026-09-04"
+       },
+       {
+        "Code": "2026-09-05"
+       },
+       {
+        "Code": "2026-09-07"
+       },
+       {
+        "Code": "2026-09-09"
+       },
+       {
+        "Code": "2026-09-11"
+       },
+       {
+        "Code": "2026-09-12"
+       }
+      ]
+     },
+     "CityName": "Wilmington",
+     "Country": {
+      "Continent": "NA",
+      "Code": "US",
+      "Description": "United States"
+     },
+     "Latitude": {
+      "DecimalDegrees": 40
+     },
+     "Longitude": {
+      "DecimalDegrees": -76
+     },
+     "RegionState": {
+      "CountryCode": "US",
+      "Code": "DE",
+      "Description": "Delaware"
+     },
+     "Code": "ILG",
+     "Description": "Philadelphia / Wilmington, DE",
+     "TypeCode": "Destination"
+    }
+   ]
+  }
+ }
+]

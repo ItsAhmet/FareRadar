@@ -1,0 +1,12 @@
+# Core
+playwright>=1.47,<2.0
+beautifulsoup4>=4.12,<5.0
+pandas>=2.2,<3.0
+streamlit>=1.38,<2.0
+plotly>=5.24,<6.0
+python-dotenv>=1.0,<2.0
+
+# Dev / test
+pytest>=8.3,<9.0
+pytest-asyncio>=0.24,<1.0
+certifi>=2024.7
