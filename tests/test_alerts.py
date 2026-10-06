@@ -68,6 +68,41 @@ def test_rule_alerts_only_on_new_matches(conn):
     assert alerts.watched_routes(conn) >= {("ILG", "TPA"), ("TPA", "ILG"), ("ILG", "LAL")}
 
 
+WINDOW = Window(datetime(2026, 10, 7, 18), datetime(2026, 10, 11, 23, 59))
+
+
+def test_package_label_names_the_home_airport():
+    outs = [f("ILG", "TPA", 8, 8, 60), f("PHL", "TPA", 8, 8, 60)]
+    backs = [f("TPA", "ILG", 11, 15, 50), f("TPA", "PHL", 11, 15, 50)]
+    its = build_itineraries(outs, backs, GetawayQuery({"TPA"}, [WINDOW], origins=["ILG", "PHL"]))
+    labels = {it.home_label: alerts.package_label(it) for it in its}
+    assert set(labels) == {"ILG", "PHL"}
+    assert labels["ILG"] != labels["PHL"]
+    assert all(home in label for home, label in labels.items())
+
+
+def test_open_jaw_package_label_shows_both_homes():
+    outs = [f("ILG", "TPA", 8, 8, 60)]
+    backs = [f("TPA", "ILG", 11, 15, 50), f("TPA", "PHL", 11, 15, 50)]
+    its = build_itineraries(outs, backs, GetawayQuery({"TPA"}, [WINDOW], origins=["ILG", "PHL"], allow_open_jaw=True))
+    labels = {it.home_label: alerts.package_label(it) for it in its}
+    assert set(labels) == {"ILG", "ILG\u2192PHL"}
+    assert "ILG\u2192PHL" in labels["ILG\u2192PHL"]
+    assert labels["ILG"] != labels["ILG\u2192PHL"]
+
+
+def test_rule_push_messages_tell_home_airports_apart(conn):
+    db.upsert_flights([f("ILG", "TPA", 8, 8, 60), f("TPA", "ILG", 11, 15, 50),
+                       f("PHL", "TPA", 8, 8, 60), f("TPA", "PHL", 11, 15, 50)], conn)
+    payload = alerts.rule_payload(["TPA"], Availability(2, time(18), 6, time(23, 59)), 1, 500, True, 100, span_days=14)
+    db.add_watch("rule", "Tampa cheap", payload, conn)
+    events = [e for e in alerts.evaluate_rules(conn, today=date(2026, 10, 1)) if e.kind == "rule_match"]
+    assert {e.origin for e in events} == {"ILG", "PHL"}
+    assert len({e.message for e in events}) == 2
+    for e in events:
+        assert e.origin in e.message
+
+
 def test_select_pushes_filters_route_signals_to_watched_routes():
     events = [
         Event("sale_wave", "ILG", "TPA", None, "sale"),
