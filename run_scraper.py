@@ -141,7 +141,7 @@ def main(argv: list[str] | None = None) -> int:
     log = logging.getLogger("run_scraper")
     if not runlock.acquire():
         log.error("another scrape is already running (pid %s); not starting", runlock.holder_pid())
-        return 3
+        return runlock.BUSY_EXIT
     try:
         return _run(args, log)
     finally:

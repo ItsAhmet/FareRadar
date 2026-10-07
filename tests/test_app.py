@@ -20,6 +20,8 @@ def mock_db(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "OFFLINE", True)  # no weather/ntfy calls in tests
     import scheduler
     monkeypatch.setattr(scheduler, "plist_path", lambda: tmp_path / "job.plist")
+    import runlock
+    monkeypatch.setattr(runlock, "LOCK_PATH", tmp_path / "scrape.lock")
     database.init_db(path)
     database.upsert_flights(generate_mock_flights(date.today(), 70))
     return path
@@ -156,3 +158,42 @@ def test_clearing_the_place_drops_cached_drive_times(mock_db):
     assert not at.exception, at.exception
     df = next(d.value for d in at.dataframe if "Door-to-door" in d.value.columns)
     assert len(df) and df["Door-to-door"].isna().all() and df["Drive (min)"].isna().all()
+
+
+class _FinishedProc:
+    """Stands in for the scrape Popen once it has exited."""
+    def __init__(self, rc):
+        self.returncode = rc
+
+    def poll(self):
+        return self.returncode
+
+
+def test_scrape_button_while_another_scrape_runs_says_busy(mock_db, tmp_path):
+    (tmp_path / "scrape.lock").write_text("1 2026-10-06T03:15:00")   # pid 1 is always alive
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    next(b for b in at.button if "Execute Target Scrape" in b.label).click().run()
+    assert not at.exception, at.exception
+    assert "scrape_proc" not in at.session_state or at.session_state["scrape_proc"] is None  # nothing spawned
+    assert any("Another scrape is already running (pid 1)" in i.value for i in at.info)
+    assert not any("reported errors" in e.value for e in at.error)
+
+
+def test_scrape_exit_code_3_is_busy_not_an_error(mock_db, tmp_path):
+    import runlock
+    at = AppTest.from_file(str(APP), default_timeout=90)
+    at.session_state["scrape_proc"] = _FinishedProc(runlock.BUSY_EXIT)
+    at.session_state["scrape_started"] = 0.0
+    at.run()
+    assert not at.exception, at.exception
+    assert any("Another scrape is already running" in i.value for i in at.info)
+    assert not any("reported errors" in e.value for e in at.error)
+
+
+def test_failed_scrape_still_reports_errors(mock_db):
+    at = AppTest.from_file(str(APP), default_timeout=90)
+    at.session_state["scrape_proc"] = _FinishedProc(1)
+    at.session_state["scrape_started"] = 0.0
+    at.run()
+    assert not at.exception, at.exception
+    assert any("Scrape reported errors" in e.value for e in at.error)

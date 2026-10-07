@@ -24,6 +24,7 @@ import database
 import alerts
 import bookings
 import places
+import runlock
 import scheduler
 import weather
 from handoff import handoff_command
@@ -408,6 +409,12 @@ def scraper_panel(destinations: list[str], start: date, end: date) -> dict:
     if pending or st.sidebar.button(
         "🎯 Execute Target Scrape", type="primary", width="stretch", disabled=not destinations or running
     ):
+        busy = runlock.running_pid()
+        if busy:  # the nightly job or a CLI scrape: don't spawn one that would exit 3
+            st.session_state.scrape_result = {
+                "rc": runlock.BUSY_EXIT, "pid": busy, "tail": f"another scrape is already running (pid {busy}); not starting\n",
+            }
+            st.rerun()
         database.maintenance()
         cmd = build_command(
             destinations, start, end, mode=depth, mock=source.startswith("Mock"), headful=headful, promo=promo or None
@@ -438,10 +445,15 @@ def scrape_monitor() -> None:
     if proc is None:
         result = st.session_state.get("scrape_result")
         if result:
-            ok, tail = result
-            (st.sidebar.success if ok else st.sidebar.error)("Scrape finished" if ok else "Scrape reported errors")
+            if result["rc"] == 0:
+                st.sidebar.success("Scrape finished")
+            elif result["rc"] == runlock.BUSY_EXIT:
+                pid = f" (pid {result['pid']})" if result.get("pid") else ""
+                st.sidebar.info(f"Another scrape is already running{pid}; try again when it finishes")
+            else:
+                st.sidebar.error("Scrape reported errors")
             with st.sidebar.expander("Scrape log"):
-                st.code(tail, language="text")
+                st.code(result["tail"], language="text")
         return
 
     elapsed = _time.time() - st.session_state.get("scrape_started", _time.time())
@@ -457,8 +469,10 @@ def scrape_monitor() -> None:
             st.code(_log_tail(1500), language="text")
         return
 
-    ok = proc.returncode == 0
-    st.session_state.scrape_result = (ok, _log_tail())
+    rc = proc.returncode
+    st.session_state.scrape_result = {
+        "rc": rc, "tail": _log_tail(), "pid": runlock.running_pid() if rc == runlock.BUSY_EXIT else None,
+    }
     st.session_state.scrape_proc = None
     st.cache_data.clear()
     _search_cache().clear()
@@ -947,8 +961,8 @@ def itinerary_timeline(ranked: list[Itinerary], n: int = 12, key: str = "timelin
 
 def main() -> None:
     database.init_db()
-    if not st.session_state.get("maintained"):
-        database.maintenance()  # drop departed flights, prune old history
+    if not st.session_state.get("maintained") and not runlock.running_pid():
+        database.maintenance()  # drop departed flights, prune old history (a running scrape does its own)
         st.session_state.maintained = True
     query, destinations, span, sort_mode, _ = sidebar()
 
