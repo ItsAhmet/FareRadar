@@ -18,7 +18,10 @@ Destinations (all 16 nonstop cities Avelo serves from ILG):
 ```
 avelo-finder/
 ├── app.py            Streamlit dashboard (system map, filters, packages)
-├── scraper.py        Playwright scraper (+ pure HTML parsers, target planner)
+├── scraper.py        Avelo Playwright scraper (+ pure HTML parsers, target planner)
+├── frontier.py       Frontier scraper (+ pure parsers, route-catalog refresh)
+├── browser.py        BaseScraper shared by every airline scraper (stealth, cookies, retry, snapshots)
+├── airlines.py       airline registry: codes, membership programs, owner-price rule
 ├── optimizer.py      Flexible Getaway engine: windows, mix-and-match, ranking
 ├── database.py       SQLite schema, migrations, upserts and queries
 ├── models.py         the shared Flight dataclass
@@ -42,7 +45,7 @@ source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 playwright install chromium        # one-time browser download (~100 MB)
 cp .env.example .env               # optional: tweak headless mode, DB path, etc.
-pytest -q                          # 172 tests, no network needed
+pytest -q                          # 281 tests, no network needed
 ```
 
 The project lives in `~/avelo-finder`, outside iCloud-synced folders. To start
@@ -62,6 +65,21 @@ python run_scraper.py --destinations TPA,LAL --start 2026-10-01 --end 2026-10-14
 and the scraper visits only ILG⇄TPA and ILG⇄LAL on days Avelo actually flies
 them (it captures Avelo's own schedule feed first and intersects). Routes with
 no flight in the span are reported as skipped.
+
+### Frontier (experimental)
+
+Frontier Airlines can be scraped alongside Avelo. It is off by default; opt in per run or in `.env`:
+
+```bash
+python run_scraper.py --airlines F9 --origins PHL --destinations MCO --days 21 --mode full
+python run_scraper.py --airlines XP,F9 --routes ILG-TPA,PHL-MCO   # each airline gets only the routes it could fly
+AVELO_AIRLINES=XP,F9                                              # in .env: the default when --airlines is omitted
+```
+
+Frontier fares are **stored but not yet shown**: packages, alerts and the dashboard still use Avelo only
+(Phase 3). Only nonstop Frontier flights are kept. Each airline gets its own scrape run, so signals compare
+like with like. Frontier's public route page lists only about 20 of ~30 destinations per home airport, so
+for a route that is not listed pass it with `--routes`.
 
 Other useful invocations:
 
@@ -263,6 +281,8 @@ Tune `can_pair` or `fit_score` in `optimizer.py` to change the rules.
 | price, currency    | Avelo PLUS member fare when shown, else public, USD |
 | base_price         | public fare (NULL if unknown)                       |
 | is_member_fare     | 1 when `price` is the Avelo PLUS fare               |
+| airline            | `XP` (Avelo) or `F9` (Frontier)                     |
+| member_price       | the airline's program fare, when shown              |
 | promo_code         | promo applied when the fare was observed, else NULL |
 | duration_minutes   | NULL for calendar rows                              |
 | flight_number      | always NULL (Avelo doesn't publish it in the flow)  |
@@ -273,7 +293,8 @@ price and timestamp, so the table always holds the freshest fare per flight.
 
 New tables: `scrape_runs`, `route_day_seen` (what each run saw),
 `route_floor`, `events` (signals and alerts, with read state), `watchlist`,
-`places` and `drive_times` (place-mode cache), `bookings`.
+`places` and `drive_times` (place-mode cache), `bookings`, `route_catalog` (which
+airline flies which route, with a nonstop flag).
 
 `price_history` is append-only: every upsert also records
 `(flight_id, departure_datetime, price, base_price, promo_code, scraped_at)`.

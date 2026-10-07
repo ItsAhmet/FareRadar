@@ -18,11 +18,13 @@ Desktop: iCloud "Optimize Mac Storage" evicted ~20k `.venv` files (`ls -lO` show
 ```bash
 cd ~/avelo-finder
 source .venv/bin/activate            # venv already built; playwright chromium installed
-pytest -q                            # 188 tests, no network; AppTest boots the dashboard
+pytest -q                            # 281 tests, no network; AppTest boots the dashboard
 streamlit run app.py                 # dashboard (nothing scrapes on load)
 python launch.py [--detach|--stop]   # start if needed + open browser; ~/Desktop/Avelo Finder.command calls it
 python run_scraper.py --destinations TPA,LAL --start 2026-10-01 --end 2026-10-14   # targeted live scrape
 python run_scraper.py --mock         # synthetic data; --mock-sale 0.25 simulates a sale
+python run_scraper.py --airlines F9 --origins PHL --destinations MCO --days 21 --mode full   # Frontier (stored, not yet shown)
+python run_scraper.py --airlines XP,F9 --routes ILG-TPA,PHL-MCO   # each airline gets only the routes it could fly
 python handoff.py --legs ILG-TPA:2026-10-09,TPA-ILG:2026-10-12   # visible browser, stops at results
 ```
 
@@ -30,6 +32,13 @@ Settings live in `.env` (git-ignored; `.env.example` documents every key).
 `AVELO_NTFY_TOPIC` is set to the owner's private ntfy topic — never print or
 change it unless asked. `AVELO_OFFLINE=1` disables all network calls (weather,
 geocoding, routing, pushes); tests set `config.OFFLINE` via monkeypatch.
+`AVELO_AIRLINES` (default `XP`) picks the airlines a scrape covers when `--airlines` is not given;
+`XP,F9` opts in to Frontier.
+
+A root `conftest.py` plus `pytest.ini` make any test that opens the owner's database (`data/flights.db`, or
+whatever `AVELO_DB_PATH` names) fail. `pytest.ini` pins pytest's rootdir so the guard loads from any working
+directory; keep both files. Two guard self-tests assert that the refused path ends in `flights.db`, so a
+scratch `AVELO_DB_PATH` for a test run should too (e.g. `/tmp/x/flights.db`).
 
 ## Layout (flat modules, all importable from the project root)
 
@@ -39,12 +48,15 @@ geocoding, routing, pushes); tests set `config.OFFLINE` via monkeypatch.
 | `trips.py` | trip keys: `airline\|origin\|dest\|date\|time-or-*`; watches/rules/bookings store these |
 | `persist.py` | writes one search result; deletes fares that vanished from covered days (never today or past days) and fares on days `routes/all` no longer lists (`clear_unscheduled`) |
 | `runlock.py` | `data/scrape.lock`, one scrape at a time; `main()` exits 3 when held |
+| `airlines.py` | airline registry: codes, membership programs, owner-price rule, Frontier URLs/site codes |
+| `browser.py` | `BaseScraper` shared by every airline scraper: stealth context, per-airline cookie file `data/browser_state_<code>.json`, retry, snapshot (.png + .html), `ScrapeReport` |
+| `frontier.py` | Frontier parsers over `window.FlightDataJson` + calendar JSON + public route pages; `FrontierScraper`; nonstop gate; `refresh_catalog` |
 | `models.py` | `Flight` frozen dataclass (price = member fare, `base_price` = public, `time_known`) |
-| `database.py` | SQLite schema + in-place migrations; flights, price_history, scrape_runs (+ `status` ok/partial/failed; only finished `ok` runs, or legacy NULL-status ones, are signal baselines), route_day_seen, route_floor, events, watchlist, bookings, places, drive_times, settings (JSON key/value; `home_costs` = per-home-airport drive minutes + parking/day, via `set_home_cost`) |
+| `database.py` | SQLite schema + in-place migrations; flights (+ `airline`, `member_price`), price_history (+ `airline`), `route_catalog` (who flies what, with a nonstop flag), memberships (`settings`, default XP yes / F9 no; `price` follows `airlines.owner_price`),  scrape_runs (+ `airline`, one run per airline; + `status` ok/partial/failed; only finished `ok` runs, or legacy NULL-status ones, are signal baselines), route_day_seen, route_floor, events, watchlist, bookings, places, drive_times, settings (JSON key/value; `home_costs` = per-home-airport drive minutes + parking/day, via `set_home_cost`) |
 | `scraper.py` | Playwright driver for Avelo's form + **pure parsers** (`parse_schedule`, `parse_lowfare_calendar`, `parse_select_page`, `plan_targets`) |
 | `optimizer.py` | `Availability`/`Window`, `GetawayQuery`, `build_itineraries`, rankings (price/fit/sun/door-to-door), `enrich*`, `wildcard` |
 | `signals.py` | sale wave / sold out / floor detection between consecutive runs |
-| `alerts.py` | watchlist rules + packages, push selection, ntfy + SMTP delivery |
+| `alerts.py` | watchlist rules + packages, push selection, ntfy + SMTP delivery; evaluated once after all airlines' runs |
 | `bookings.py` | booked-trip tracker + Plus ROI meter |
 | `planner.py` | season planner (one trip per window under a budget) |
 | `holidays.py` | US federal holidays, computed |
@@ -53,10 +65,11 @@ geocoding, routing, pushes); tests set `config.OFFLINE` via monkeypatch.
 | `scheduler.py` | launchd plist install/remove (cron line elsewhere) |
 | `handoff.py` | assisted booking: headful browser, per-leg search, never books |
 | `netutil.py` | urllib with certifi CA bundle (python.org CPython on macOS has no roots) |
-| `run_scraper.py` | CLI; `build_command()` is what the dashboard button runs |
+| `run_scraper.py` | CLI (`--airlines`, per-airline `--promo F9=CODE`); one run per airline; `--routes` is split per airline when several are requested; `build_command()` is what the dashboard button runs |
 | `mock_data.py` | deterministic synthetic ILG schedule |
 | `app.py` | Streamlit dashboard |
 | `launch.py` | one-click launcher (venv re-exec, health-check reuse, detach/stop via `data/streamlit.pid`); `~/Desktop/Avelo Finder.command` calls it |
+| `conftest.py`, `pytest.ini` | refuse to open the owner's database under pytest; pin the rootdir so that guard always loads |
 | `tests/` | pytest; `tests/fixtures/` holds HTML/JSON captured from the live site (Sep 2026) |
 | `docs/superpowers/specs/2026-09-07-getaway-features-design.md` | the 12-feature spec; all 3 phases built |
 
@@ -105,6 +118,30 @@ geocoding, routing, pushes); tests set `config.OFFLINE` via monkeypatch.
   rename, on the first Avelo run; **cookies only** — persisting localStorage stops the app re-fetching routes/all),
   webdriver masked, trackers/images blocked, human pauses.
 
+## How Frontier's site works (probed 2026-10-06, fixtures in `tests/fixtures/frontier/`)
+
+- `booking.flyfrontier.com/Flight/InternalSelect?o1=PHL&d1=MCO&dd1=Nov 12, 2026&ADT=1&mon=true` renders a
+  server-side page that embeds every flight as JSON in `window.FlightDataJson`: fares for Discount Den and
+  standard, local times, stops. Most flights are connections; only `stopCount == 0` single-leg flights count.
+- Adding `&c=true` shows a month calendar that POSTs `/Flight/GetLowFareCalendarAvailability`; the response
+  holds the lowest **Discount Den** total per day (amount + taxesAndFees). It does not say whether that fare
+  is a nonstop, so calendar rows are placeholders (`F9CAL-ORG-DST`, 00:00) that a day search confirms
+  (`F9-<number>-ORG-DST`).
+- `flights.flyfrontier.com/en/flights-from-<city>` (plain HTTP) lists the destinations it sells from a city.
+- Headless works with the shared stealth setup.
+- Frontier calls West Palm Beach `DJT`; the app's code is `PBI`. Converted at the scraper boundary only
+  (`config.FRONTIER_SITE_CODES`).
+- Most flights are connections, and a route with only connections must never yield stored fares
+  (the nonstop gate probes a few days and records the answer in `route_catalog.nonstop`).
+- Fare semantics: `price` = what the owner would pay (program fare if a member of that airline's program, else
+  public), `base_price` = public fare, `member_price` = program fare. Frontier fares are stored, not yet shown.
+- **Known limitations.** The public route page is paginated: only about 20 of ~30 destinations per home airport
+  reach `route_catalog`, so unlisted routes need `--routes` (e.g. `--airlines F9 --routes PHL-MCO`).
+  `frontier.is_challenge_page` markers are **unverified**: no real challenge page has been captured, so a
+  missed one shows up as a plain `ScrapeError` (nothing deleted) instead of stopping the run as blocked.
+  The live Frontier check (plan Task 9 Step 2) is done with the owner; when a real challenge or results page is
+  captured, save it under `tests/fixtures/frontier/` and correct `_CHALLENGE_MARKERS`.
+
 ## Conventions
 
 - Parsers and detectors are pure functions tested against fixtures; the browser
@@ -125,6 +162,12 @@ geocoding, routing, pushes); tests set `config.OFFLINE` via monkeypatch.
   every `st.plotly_chart` a unique `key`; widgets driven from callbacks use
   `session_state` keys, not `value=`. `tests/test_app.py` uses `AppTest`.
 - Package/watch identity is the trip key, never the flight_id row.
+- Every fare delete is scoped to one airline (an Avelo run never deletes or shadows Frontier rows, and vice versa).
+- One scrape run per airline; baselines compare same-airline runs. Alerts are evaluated once, after all
+  airlines' runs; the dashboard's "latest run" is each airline's newest run (`database.latest_run_ids`).
+- An index on a migrated column is created in `_migrate`, not `SCHEMA` (`SCHEMA` runs first, so on an
+  existing database the column does not exist yet).
+- Until Phase 3, packages/alerts read `XP` rows only (`optimizer.find_itineraries`).
 - A run's `status` (ok/partial/failed) decides whether it can be a signal baseline.
 - Total Getaway Cost = member fares only; `MemberBenefits` locks add-ons at $0.
 - Long scrapes run as a `Popen` from the dashboard with a log tail, cancel, and timeout.
