@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 import frontier
-from browser import ScrapeError
+from browser import EmptyResults, ScrapeError
 
 FX = Path(__file__).parent / "fixtures" / "frontier"
 
@@ -115,12 +115,39 @@ def test_real_frontier_pages_are_not_flagged_as_challenges(name):
     assert not frontier.is_challenge_page(path.read_text())
 
 
-def test_probe_days_picks_the_cheapest_distinct_days():
+def test_probe_days_spread_over_weekdays_cheapest_first():
     flights, _ = frontier.parse_calendar(load("lowfare_calendar_PHL_MCO_2026-11.json"), "PHL", "MCO")
-    days = frontier.probe_days(flights, 3)
-    cheapest = sorted(flights, key=lambda f: (f.price, f.departure_date))[:3]
-    assert days == sorted(f.departure_date for f in cheapest) and len(set(days)) == 3
-    assert frontier.probe_days([], 3) == []
+    price = {f.departure_date: f.price for f in flights}
+    week = frontier.probe_days(flights, 7)
+    assert len(week) == 7 and week == sorted(week) and {d.weekday() for d in week} == set(range(7))
+    for d in week:                                                              # the cheapest day of its weekday
+        assert price[d] == min(p for other, p in price.items() if other.weekday() == d.weekday())
+    three = frontier.probe_days(flights, 3)
+    assert len({d.weekday() for d in three}) == 3 and set(three) <= set(week)   # fewer probes: still distinct weekdays
+    assert max(price[d] for d in three) <= min(price[d] for d in week if d not in three)
+    assert frontier.probe_days([], 7) == []
+
+
+def test_probe_days_do_not_all_land_on_the_cheap_connection_days():
+    # Nonstop on Thursdays and Sundays only ($200); every other day is a cheaper connection ($60-$75).
+    fares = {d: (200.0 if date(2026, 11, d).weekday() in (3, 6) else 60.0 + d % 4 * 5) for d in range(2, 30)}
+    days = frontier.probe_days([cal_flight(d, p) for d, p in fares.items()], config.FRONTIER_PROBE_DAYS)
+    assert {3, 6} <= {d.weekday() for d in days}                                # the old "3 cheapest" rule saw neither
+    cheapest3 = sorted(fares, key=lambda d: (fares[d], d))[:3]
+    assert not {date(2026, 11, d).weekday() for d in cheapest3} & {3, 6}
+    few = frontier.probe_days([cal_flight(d, p) for d, p in fares.items() if d in (3, 10, 17, 4)], 7)
+    assert few == [date(2026, 11, d) for d in (3, 4, 10, 17)]                   # fewer weekdays than probes: fill up
+
+
+def test_no_nonstop_is_proven_only_by_a_full_week_of_answers():
+    week = [date(2026, 11, d) for d in range(10, 17)]                           # Tue..Mon
+    proven = frontier.no_nonstop_proven
+    assert proven(week, week)
+    assert not proven(week, week[:6]) and not proven(week, []) and not proven([], [])   # a probe failed / nothing planned
+    assert not proven(week[:3], week[:3])                                       # three weekdays say nothing of the other four
+    assert not proven(week[:3], week[:3], priced=week, answered=week)           # the calendar priced the other four
+    assert proven(week[:3], week[:3], priced=week[:3], answered=week)           # ...or showed no fare of any kind on them
+    assert not proven(week[:3], week[:3], priced=week[:3], answered=week[:5])   # two weekdays nobody answered for
 
 
 # --------------------------------------------------------------------------- #
@@ -186,9 +213,9 @@ def scraper_with(monkeypatch, mode, calendar=None, days=None):
     return s
 
 
-def run_routes(s, routes=(("PHL", "MCO"),)):
+def run_routes(s, routes=(("PHL", "MCO"),), wanted=WANTED):
     report = ScrapeReport()
-    asyncio.run(s._run_routes(list(routes), set(WANTED), TODAY, report))
+    asyncio.run(s._run_routes(list(routes), set(wanted), TODAY, report))
     return report
 
 
@@ -197,14 +224,16 @@ def stored():
 
 
 CAL = ([cal_flight(10, 80), cal_flight(11, 60), cal_flight(12, 70), cal_flight(14, 95)], [date(2026, 11, d) for d in range(1, 31)])
+WEEK = {date(2026, 11, d) for d in range(10, 17)}             # Nov 10-16: every weekday once
 
 
 def test_unknown_route_is_probed_then_gets_its_placeholders(f9db, monkeypatch):
     s = scraper_with(monkeypatch, "calendar", calendar=CAL, days={date(2026, 11, 11): [timed_flight(11)]})
     report = run_routes(s)
-    assert [c for c in s.calls if c[0] == "day"] == [("day", date(2026, 11, d)) for d in (10, 11, 12)]   # 3 cheapest days
+    assert [c for c in s.calls if c[0] == "day"] == [("day", date(2026, 11, d)) for d in (10, 11)]       # stops at the first nonstop
     assert db.route_nonstop("F9", "PHL", "MCO") is True and report.failed == 0
     assert ("F9-2415-PHL-MCO", datetime(2026, 11, 11, 8)) in stored()
+    assert ("F9CAL-PHL-MCO", datetime(2026, 11, 12)) in stored()                                        # not probed: placeholder kept
     assert ("F9CAL-PHL-MCO", datetime(2026, 11, 14)) in stored()                                        # placeholder kept
     assert ("F9CAL-PHL-MCO", datetime(2026, 11, 11)) not in stored()                                    # shadowed by the timed row
     assert ("F9CAL-PHL-MCO", datetime(2026, 11, 10)) not in stored()                                    # searched: no nonstop that day
@@ -216,11 +245,48 @@ def test_unknown_route_is_probed_then_gets_its_placeholders(f9db, monkeypatch):
 
 def test_connecting_only_route_stores_nothing_and_is_skipped_next_time(f9db, monkeypatch):
     s = scraper_with(monkeypatch, "calendar", calendar=CAL, days={})          # every probed day: flights, none nonstop
-    run_routes(s)
+    run_routes(s, wanted=WEEK)
+    assert [c[1].day for c in s.calls if c[0] == "day"] == [10, 11, 12, 14]   # every weekday the calendar priced
     assert stored() == [] and db.route_nonstop("F9", "PHL", "MCO") is False
     again = scraper_with(monkeypatch, "calendar", calendar=CAL)
-    report = run_routes(again)
+    report = run_routes(again, wanted=WEEK)
     assert again.calls == [] and report.attempted == 0
+
+
+def test_one_answered_probe_does_not_rule_a_route_out(f9db, monkeypatch):
+    failed = {date(2026, 11, 10): frontier.ScrapeError("x"), date(2026, 11, 12): frontier.ScrapeError("y")}
+    s = scraper_with(monkeypatch, "calendar", calendar=CAL, days=failed)      # Nov 11 and 14 answer: no nonstop
+    report = run_routes(s, wanted=WEEK)
+    assert (report.succeeded, report.failed) == (3, 2)
+    assert db.route_nonstop("F9", "PHL", "MCO") is None and stored() == []    # unknown: probed again next run
+    again = scraper_with(monkeypatch, "calendar", calendar=CAL, days={date(2026, 11, 12): [timed_flight(12)]})
+    run_routes(again, wanted=WEEK)
+    assert db.route_nonstop("F9", "PHL", "MCO") is True                       # the day whose probe had failed was the nonstop
+
+
+def test_a_request_shorter_than_a_week_does_not_rule_a_route_out(f9db, monkeypatch):
+    s = scraper_with(monkeypatch, "calendar", calendar=CAL, days={})          # Nov 10-15: no Monday in the request
+    report = run_routes(s)
+    assert report.failed == 0 and [c[1].day for c in s.calls if c[0] == "day"] == [10, 11, 12, 14]
+    assert db.route_nonstop("F9", "PHL", "MCO") is None and stored() == []
+    detail = scraper_with(monkeypatch, "detail", days={})                     # detail mode: same rule, no calendar
+    run_routes(detail)
+    assert db.route_nonstop("F9", "PHL", "MCO") is None
+    run_routes(scraper_with(monkeypatch, "detail", days={}), wanted=WEEK)     # seven days searched, none nonstop
+    assert db.route_nonstop("F9", "PHL", "MCO") is False
+
+
+def test_less_than_daily_nonstop_route_is_found_by_the_weekday_probes(f9db, monkeypatch):
+    # Nonstop on Sundays only, at $200; every other day a $60-$75 connection. The 3 cheapest days are all connections.
+    wanted = {date(2026, 11, d) for d in range(2, 30)}
+    cal = ([cal_flight(d, 200.0 if date(2026, 11, d).weekday() == 6 else 60.0 + d % 4 * 5) for d in range(2, 30)],
+           [date(2026, 11, d) for d in range(1, 31)])
+    sundays = {date(2026, 11, d): [timed_flight(d, price=200.0)] for d in (8, 15, 22, 29)}
+    s = scraper_with(monkeypatch, "calendar", calendar=cal, days=sundays)
+    run_routes(s, wanted=wanted)
+    assert db.route_nonstop("F9", "PHL", "MCO") is True
+    assert len([c for c in s.calls if c[0] == "day"]) <= config.FRONTIER_PROBE_DAYS
+    assert any(fid.startswith("F9-2415") for fid, _when in stored())
 
 
 def test_confirmed_route_in_calendar_mode_needs_no_day_searches(f9db, monkeypatch):
@@ -264,9 +330,9 @@ def test_failed_calendar_month_covers_nothing(f9db, monkeypatch):
 def test_bad_results_pages_on_an_unknown_route_decide_nothing(f9db, monkeypatch):
     db.upsert_flights([timed_flight(10), cal_flight(14, 95)])                  # stored by an earlier run
     bad = frontier.ScrapeError("results page lists no flights at all on a day the calendar priced")
-    s = scraper_with(monkeypatch, "calendar", calendar=CAL, days={date(2026, 11, d): bad for d in (10, 11, 12)})
+    s = scraper_with(monkeypatch, "calendar", calendar=CAL, days={date(2026, 11, d): bad for d in (10, 11, 12, 14)})
     report = run_routes(s)
-    assert (report.attempted, report.succeeded, report.failed) == (4, 1, 3)    # the calendar worked, the 3 probes did not
+    assert (report.attempted, report.succeeded, report.failed) == (5, 1, 4)    # the calendar worked, the 4 probes did not
     assert db.route_nonstop("F9", "PHL", "MCO") is None and not report.blocked  # still unknown: probed again next run
     assert stored() == [("F9-2415-PHL-MCO", datetime(2026, 11, 10, 8)), ("F9CAL-PHL-MCO", datetime(2026, 11, 14))]
     assert db.seen_in_run(s.run_id, "PHL", "MCO") == {}
@@ -293,10 +359,10 @@ class FakeResultsPage:
         return self.html
 
 
-def day_search(page, day=date(2026, 11, 12)):
-    s = frontier.FrontierScraper(member=False, screenshots=False, max_retries=0)
+def day_search(page, day=date(2026, 11, 12), route=("PHL", "MCO"), mode="calendar"):
+    s = frontier.FrontierScraper(mode=mode, member=False, screenshots=False, max_retries=0)
     s._page = page
-    return asyncio.run(s.scrape_day("PHL", "MCO", day))
+    return asyncio.run(s.scrape_day(*route, day))
 
 
 def test_scrape_day_tells_no_nonstop_from_a_page_without_flights():
@@ -305,10 +371,89 @@ def test_scrape_day_tells_no_nonstop_from_a_page_without_flights():
     flights = day_search(page)
     assert flights and all(f.flight_id.startswith("F9-") and f.departure_date == date(2026, 11, 12) for f in flights)
     assert "o1=PHL&d1=MCO" in page.urls[0] and "c=true" not in page.urls[0]
-    connecting_only = {"journeys": [{"flights": [f for f in payload["journeys"][0]["flights"] if f["stopCount"] > 0]}]}
+    journey = payload["journeys"][0]
+    connecting_only = {"journeys": [{**journey, "flights": [f for f in journey["flights"] if f["stopCount"] > 0]}]}
     assert day_search(FakeResultsPage(connecting_only)) == []                  # an answer: no nonstop that day
-    with pytest.raises(ScrapeError, match="no flights at all"):
-        day_search(FakeResultsPage({"journeys": [{"flights": []}]}))           # not an answer: a bad page
+    with pytest.raises(ScrapeError, match="no flights at all on a day the calendar priced") as caught:
+        day_search(FakeResultsPage({"journeys": [{**journey, "flights": []}]}))   # not an answer: a bad page
+    assert not isinstance(caught.value, EmptyResults)                          # the calendar priced it: worth a retry
+
+
+def test_scrape_day_rejects_a_page_for_another_day_or_route():
+    payload = load("select_PHL_MCO_2026-11-12.json")                           # what the site served
+    with pytest.raises(ScrapeError, match="PHL-MCO on 2026-11-12, not PHL-MCO on 2026-11-13"):
+        day_search(FakeResultsPage(payload), day=date(2026, 11, 13))           # asked for the 13th
+    with pytest.raises(ScrapeError, match="not PHL-TPA"):
+        day_search(FakeResultsPage(payload), route=("PHL", "TPA"))
+    with pytest.raises(ScrapeError, match="not MCO-PHL"):
+        day_search(FakeResultsPage(payload), route=("MCO", "PHL"))             # reversed
+    unnamed = {"journeys": [{"flights": payload["journeys"][0]["flights"]}]}
+    with pytest.raises(ScrapeError, match=r"\?-\? on \?"):
+        day_search(FakeResultsPage(unnamed))                                   # cannot prove which search it answers
+    frontier.check_select(payload, " phl", "mco ", date(2026, 11, 12))         # same search, any case/whitespace
+    for name, route, day in (("select_MCO_PHL_2026-11-15.json", ("MCO", "PHL"), date(2026, 11, 15)),
+                             ("select_BWI_TPA_2026-11-13.json", ("BWI", "TPA"), date(2026, 11, 13))):
+        assert day_search(FakeResultsPage(load(name)), day=day, route=route)   # every real capture passes its own guard
+    djt = {"journeys": [{**payload["journeys"][0], "arrivalStation": "DJT"}]}
+    frontier.check_select(djt, "PHL", "PBI", date(2026, 11, 12))               # Frontier's code for West Palm Beach
+
+
+def test_wrong_day_page_deletes_nothing_and_decides_nothing(f9db, monkeypatch):
+    """The Nov 12 page served for a Nov 13 detail search used to read as "no nonstop on the 13th"."""
+    db.upsert_flights([timed_flight(13)])
+    s = frontier.FrontierScraper(mode="detail", member=False, screenshots=False, max_retries=0,
+                                 run_id=db.start_run("detail", [("PHL", "MCO")], airline="F9"))
+    s._page = FakeResultsPage(load("select_PHL_MCO_2026-11-12.json"))
+    for name in ("_polite_delay", "_save_state", "_snapshot"):
+        monkeypatch.setattr(s, name, _no_wait)
+    report = ScrapeReport()
+    asyncio.run(s._run_routes([("PHL", "MCO")], {date(2026, 11, 13)}, TODAY, report))
+    assert (report.succeeded, report.failed) == (0, 1) and "not PHL-MCO on 2026-11-13" in report.failures[0]
+    assert stored() == [("F9-2415-PHL-MCO", datetime(2026, 11, 13, 8))]        # the stored fare survives
+    assert db.route_nonstop("F9", "PHL", "MCO") is None and db.seen_in_run(s.run_id, "PHL", "MCO") == {}
+
+
+def test_detail_mode_empty_day_is_one_unretried_failure_with_honest_wording(f9db, monkeypatch):
+    db.set_route_nonstop("F9", "PHL", "MCO", True)
+    db.upsert_flights([timed_flight(13)])
+    journey = load("select_PHL_MCO_2026-11-12.json")["journeys"][0]
+    page = FakeResultsPage({"journeys": [{**journey, "departureDate": "2026-11-13T00:00:00", "flights": []}]})
+    s = frontier.FrontierScraper(mode="detail", member=False, screenshots=False, max_retries=2,
+                                 run_id=db.start_run("detail", [("PHL", "MCO")], airline="F9"))
+    s._page = page
+    snapshots = []
+
+    async def snapshot(tag, attempt):
+        snapshots.append(attempt)
+
+    for name in ("_polite_delay", "_save_state"):
+        monkeypatch.setattr(s, name, _no_wait)
+    monkeypatch.setattr(s, "_snapshot", snapshot)
+    report = ScrapeReport()
+    asyncio.run(s._run_routes([("PHL", "MCO")], {date(2026, 11, 13)}, TODAY, report))
+    assert len(page.urls) == 1 and snapshots == [0]                            # one load, one snapshot, no retries
+    assert report.failed == 1 and "calendar" not in report.failures[0] and "may not be on sale" in report.failures[0]
+    assert stored() == [("F9-2415-PHL-MCO", datetime(2026, 11, 13, 8))] and db.seen_in_run(s.run_id, "PHL", "MCO") == {}
+    with pytest.raises(EmptyResults):
+        day_search(FakeResultsPage({"journeys": [{**journey, "flights": []}]}), mode="detail")
+
+
+def test_promo_code_tags_calendar_placeholders_and_day_rows(f9db, monkeypatch):
+    db.set_route_nonstop("F9", "PHL", "MCO", True)
+    assert frontier.FrontierScraper(screenshots=False, member=False).promo_applied is False
+    promo = frontier.FrontierScraper(mode="calendar", screenshots=False, max_retries=0, promo_code="save20",
+                                     run_id=db.start_run("calendar", [("PHL", "MCO")], airline="F9"))
+    assert promo.promo_applied is True                                         # the code rides in every search URL
+
+    async def calendar(origin, dest, anchor):
+        return CAL
+
+    monkeypatch.setattr(promo, "scrape_calendar_month", calendar)              # confirmed route: no day search at all
+    for name in ("_polite_delay", "_save_state", "_snapshot"):
+        monkeypatch.setattr(promo, name, _no_wait)
+    run_routes(promo)
+    rows = db.query_flights(["PHL"], ["MCO"], date(2026, 11, 1), date(2026, 11, 30), airlines=["F9"])
+    assert len(rows) == 4 and {f.promo_code for f in rows} == {"SAVE20"}       # placeholders used to be stored untagged
 
 
 def test_scrape_day_without_flight_data_is_a_block_or_a_layout_change():
@@ -525,5 +670,5 @@ def test_scraper_helper_without_a_test_database_never_reaches_the_real_one(_no_r
     """scraper_with() starts a run row; without f9db that used to open (and migrate) data/flights.db."""
     with pytest.raises(RuntimeError, match="real database"):
         scraper_with(monkeypatch, "calendar")
-    assert _no_real_database and _no_real_database[0].endswith("flights.db")
+    assert [Path(p) for p in _no_real_database] == [Path(config.DB_PATH)]      # whatever AVELO_DB_PATH names
     _no_real_database.clear()

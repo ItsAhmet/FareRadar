@@ -37,8 +37,7 @@ geocoding, routing, pushes); tests set `config.OFFLINE` via monkeypatch.
 
 A root `conftest.py` plus `pytest.ini` make any test that opens the owner's database (`data/flights.db`, or
 whatever `AVELO_DB_PATH` names) fail. `pytest.ini` pins pytest's rootdir so the guard loads from any working
-directory; keep both files. Two guard self-tests assert that the refused path ends in `flights.db`, so a
-scratch `AVELO_DB_PATH` for a test run should too (e.g. `/tmp/x/flights.db`).
+directory; keep both files. A scratch `AVELO_DB_PATH` for a test run may have any name.
 
 ## Layout (flat modules, all importable from the project root)
 
@@ -56,7 +55,7 @@ scratch `AVELO_DB_PATH` for a test run should too (e.g. `/tmp/x/flights.db`).
 | `scraper.py` | Playwright driver for Avelo's form + **pure parsers** (`parse_schedule`, `parse_lowfare_calendar`, `parse_select_page`, `plan_targets`) |
 | `optimizer.py` | `Availability`/`Window`, `GetawayQuery`, `build_itineraries`, rankings (price/fit/sun/door-to-door), `enrich*`, `wildcard` |
 | `signals.py` | sale wave / sold out / floor detection between consecutive runs; `XP` runs only until Phase 3 (`SIGNAL_AIRLINES`) |
-| `alerts.py` | watchlist rules + packages, push selection, ntfy + SMTP delivery; evaluated once after all airlines' runs |
+| `alerts.py` | watchlist rules + packages, push selection, ntfy + SMTP delivery; watches/rules evaluated once after all airlines' runs, an airline's route signals pushed right after its run when another airline follows |
 | `bookings.py` | booked-trip tracker + Plus ROI meter |
 | `planner.py` | season planner (one trip per window under a budget) |
 | `holidays.py` | US federal holidays, computed |
@@ -132,7 +131,11 @@ scratch `AVELO_DB_PATH` for a test run should too (e.g. `/tmp/x/flights.db`).
 - Frontier calls West Palm Beach `DJT`; the app's code is `PBI`. Converted at the scraper boundary only
   (`config.FRONTIER_SITE_CODES`).
 - Most flights are connections, and a route with only connections must never yield stored fares
-  (the nonstop gate probes a few days and records the answer in `route_catalog.nonstop`).
+  (the nonstop gate probes one day per weekday, `config.FRONTIER_PROBE_DAYS`, stops at the first nonstop, and
+  records the answer in `route_catalog.nonstop`; "no nonstop" is recorded, and the route skipped for 30 days,
+  only when every probe answered and all seven weekdays are accounted for: `frontier.no_nonstop_proven`).
+- A day-search page must name the requested route and day (`frontier.check_select`); a page for anything else
+  is a failed search, never "no nonstop that day".
 - Fare semantics: `price` = what the owner would pay (program fare if a member of that airline's program, else
   public), `base_price` = public fare, `member_price` = program fare. Frontier fares are stored, not in packages/watches/calendar/signals (see the Phase 3 convention below); they do still
   appear in the dashboard's freshness table and selection counts (`route_freshness`, `selection_stats` are not
@@ -165,8 +168,9 @@ scratch `AVELO_DB_PATH` for a test run should too (e.g. `/tmp/x/flights.db`).
   `session_state` keys, not `value=`. `tests/test_app.py` uses `AppTest`.
 - Package/watch identity is the trip key, never the flight_id row.
 - Every fare delete is scoped to one airline (an Avelo run never deletes or shadows Frontier rows, and vice versa).
-- One scrape run per airline; baselines compare same-airline runs. Alerts are evaluated once, after all
-  airlines' runs; the dashboard's "latest run" is each airline's newest run (`database.latest_run_ids`).
+- One scrape run per airline; baselines compare same-airline runs. Watches, rules and bookings are evaluated
+  once, after all airlines' runs; an airline's route signals are pushed right after its own run when another
+  airline follows (its finished run is the next baseline, so a scrape killed later would lose them); the dashboard's "latest run" is each airline's newest run (`database.latest_run_ids`).
 - An index on a migrated column is created in `_migrate`, not `SCHEMA` (`SCHEMA` runs first, so on an
   existing database the column does not exist yet).
 - Until Phase 3, packages, watch evaluation and the fare calendar read `XP` rows only (`optimizer.find_itineraries`,

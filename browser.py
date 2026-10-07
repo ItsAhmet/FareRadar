@@ -50,6 +50,11 @@ class BlockedError(ScrapeError):
     """The site answered with a bot challenge instead of the page. Not retried within a run."""
 
 
+class EmptyResults(ScrapeError):
+    """A results page loaded and listed no flight of any kind, where that cannot be told from a day that is not on
+    sale. A failure (nothing is deleted or recorded) that is not retried: the same page would come back."""
+
+
 @dataclass
 class ScrapeReport:
     attempted: int = 0
@@ -175,6 +180,7 @@ class BaseScraper:
         )
         self._page = await self._context.new_page()
         return self._page
+
     def _tag(self, flight: Flight) -> Flight:
         """Record which promo (if any) was active when the fare was observed."""
         code = self.promo_code if self.promo_applied else None
@@ -215,6 +221,9 @@ class BaseScraper:
                 return await fn(*args)
             except (DateUnavailable, BlockedError):
                 raise  # an answer or a block: retrying cannot help
+            except EmptyResults:
+                await self._snapshot(tag, attempt)
+                raise  # a failure, but the same page would come back
             except (PlaywrightTimeout, ScrapeError) as exc:
                 await self._snapshot(tag, attempt)
                 if attempt >= self.max_retries:
@@ -228,11 +237,16 @@ class BaseScraper:
     async def _snapshot(self, tag: str, attempt: int) -> None:
         if not self.screenshots or self._page is None:
             return
+        path = config.SCREENSHOT_DIR / f"{tag}-{attempt}-{datetime.now():%Y%m%d%H%M%S}.png"
+        # The HTML first and on its own: it is what a new fixture (or a check of the challenge markers) needs,
+        # and a full-page screenshot is the likelier of the two to fail (blocked images, a page mid-navigation).
         try:
             config.SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
-            path = config.SCREENSHOT_DIR / f"{tag}-{attempt}-{datetime.now():%Y%m%d%H%M%S}.png"
+            path.with_suffix(".html").write_text(await self._page.content())
+        except Exception:  # noqa: BLE001 - snapshots are best-effort
+            pass
+        try:
             await self._page.screenshot(path=str(path), full_page=True)
-            path.with_suffix(".html").write_text(await self._page.content())  # the page itself, for a new fixture
             log.debug("saved %s", path)
-        except Exception:  # noqa: BLE001 - screenshots are best-effort
+        except Exception:  # noqa: BLE001 - snapshots are best-effort
             pass

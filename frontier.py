@@ -25,7 +25,7 @@ import airlines
 import config
 import database
 import persist
-from browser import BaseScraper, BlockedError, ScrapeError, ScrapeReport, answerable_days, local_today
+from browser import BaseScraper, BlockedError, EmptyResults, ScrapeError, ScrapeReport, answerable_days, local_today
 from models import Flight
 from netutil import open_url
 
@@ -64,6 +64,27 @@ def _journey_flights(payload: dict) -> list[dict]:
 def select_has_flights(payload: dict) -> bool:
     """Did the day search return any flight at all (nonstop or connecting)?"""
     return bool(_journey_flights(payload))
+
+
+def check_select(payload: dict, origin: str, destination: str, day: date) -> None:
+    """Raise unless the day-search payload says it answers for this route on this day.
+
+    `parse_select` drops flights of another route or day, so a page for the wrong search (a redirect to a
+    default search, a late page for the previous one) would otherwise read as "no nonstop that day": the
+    stored fare deleted and an unknown route marked connecting-only. A payload that does not name its
+    route and day proves nothing, so it is rejected too.
+    """
+    origin, destination = origin.strip().upper(), destination.strip().upper()
+    journeys = (payload or {}).get("journeys") or []
+    journey = journeys[0] if journeys and isinstance(journeys[0], dict) else {}
+    stations = (_F9.app_code(journey.get("departureStation") or ""), _F9.app_code(journey.get("arrivalStation") or ""))
+    try:
+        answered = datetime.fromisoformat(journey["departureDate"]).date()
+    except (KeyError, TypeError, ValueError):
+        answered = None
+    if stations != (origin, destination) or answered != day:
+        raise ScrapeError(f"Frontier results are for {stations[0] or '?'}-{stations[1] or '?'} on {answered or '?'}, "
+                          f"not {origin}-{destination} on {day}")
 
 
 def parse_select(payload: dict, origin: str, destination: str, day: date, member: bool = False,
@@ -159,11 +180,41 @@ def is_challenge_page(html: str) -> bool:
 
 
 def probe_days(flights: list[Flight], limit: int) -> list[date]:
-    """The cheapest distinct days among calendar placeholders, in date order: where to look for a nonstop."""
+    """Where to look for a nonstop among calendar placeholders: up to `limit` days, in date order, spread over
+    as many weekdays as possible (the cheapest day of each weekday first, then the cheapest days left).
+
+    The calendar's lowest fare is often a connection (MCO→PHL: connections from $139, nonstops from $204), so
+    the cheapest days overall can all be connection-only on a route flown nonstop a few days a week.
+    Schedules repeat weekly; one day per weekday sees every such route.
+    """
     cheapest: dict[date, float] = {}
     for f in flights:
         cheapest[f.departure_date] = min(f.price, cheapest.get(f.departure_date, float("inf")))
-    return sorted(sorted(cheapest, key=lambda d: (cheapest[d], d))[:limit])
+    by_price = sorted(cheapest, key=lambda d: (cheapest[d], d))
+    per_weekday: dict[int, date] = {}
+    for d in by_price:
+        per_weekday.setdefault(d.weekday(), d)
+    first = list(per_weekday.values())                       # already cheapest-first
+    rest = [d for d in by_price if d not in set(first)]
+    return sorted((first + rest)[:limit])
+
+
+def no_nonstop_proven(planned: Iterable[date], searched: Iterable[date], priced: Iterable[date] = (),
+                      answered: Iterable[date] = ()) -> bool:
+    """Is "this route has no nonstop" safe to record (the route is then skipped for a month)?
+
+    Only when every planned day search answered and, between them, all seven weekdays are accounted for:
+    searched, or shown by the calendar (`answered` days with no `priced` day on that weekday) to have no
+    fare of any kind. Anything less (a failed probe, a request shorter than a week) can miss a route
+    flown a few days a week, so the route stays unknown and is probed again on the next run.
+    """
+    def weekdays(days: Iterable[date]) -> set[int]:
+        return {d.weekday() for d in days}
+
+    planned = set(planned)
+    if not planned or planned - set(searched):
+        return False
+    return len(weekdays(planned) | (weekdays(answered) - weekdays(priced))) == 7
 
 
 # --------------------------------------------------------------------------- #
@@ -225,6 +276,9 @@ class FrontierScraper(BaseScraper):
     def __init__(self, *args, member: bool | None = None, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.member = database.memberships().get(AIRLINE, False) if member is None else member
+        # The code travels in the URL of every search, calendar and day alike, so every fare this run
+        # observes was observed under it. (Avelo applies its code in a form step and sets this there.)
+        self.promo_applied = bool(self.promo_code)
         self._blocked_streak = 0
 
     async def run(self, routes: Iterable[tuple[str, str]], dates: Iterable[date]) -> ScrapeReport:
@@ -293,10 +347,18 @@ class FrontierScraper(BaseScraper):
                     known = True
                 found_nonstop = found_nonstop or bool(flights)
                 log.info("F9 %s→%s %s: %d nonstop(s)", origin, dest, day, len(flights))
+                if flights and self.mode == "calendar":
+                    break  # the probes only ask "is there a nonstop?"; it is answered
 
             if known is None and searched and not found_nonstop:
-                database.set_route_nonstop(AIRLINE, origin, dest, False)
-                log.info("F9 %s→%s: %d day(s) searched, no nonstop — treated as connecting-only", origin, dest, len(searched))
+                priced = {f.departure_date for f in calendar_flights}
+                answered = {d for covered, _flights in months for d in covered}
+                if no_nonstop_proven(days, searched, priced, answered):
+                    database.set_route_nonstop(AIRLINE, origin, dest, False)
+                    log.info("F9 %s→%s: %d day(s) searched, no nonstop — treated as connecting-only", origin, dest, len(searched))
+                else:
+                    log.info("F9 %s→%s: no nonstop on %d of %d planned day(s); not enough to rule the route out, "
+                             "it will be probed again", origin, dest, len(searched), len(days))
             if known is True:
                 # A day searched in this run already has its answer from save_day: its real nonstops (or none) and
                 # the matching sighting. The calendar's fare for that day may be a connection, so the day is left
@@ -369,10 +431,12 @@ class FrontierScraper(BaseScraper):
             raise ScrapeError("results page has no FlightDataJson (layout may have changed)") from None
         payload = await page.evaluate(_FLIGHT_DATA_READ)
         if not select_has_flights(payload):
-            # A results page with no flight of any kind is not "no nonstop today": every day we search was priced
-            # by the calendar, so this is a bad page. Raising makes _attempt count a failure: nothing is deleted
-            # and an unknown route is not marked connecting-only. Only a page WITH flights, none nonstop, gives [].
+            # A results page with no flight of any kind is not taken as "no nonstop today". Raising makes _attempt
+            # count a failure: nothing is deleted and an unknown route is not marked connecting-only. Only a page
+            # WITH flights, none nonstop, gives [].
+            if self.mode == "detail":
+                # No calendar ran, so the day may simply not be on sale; the same page would come back: no retry.
+                raise EmptyResults("results page lists no flights at all (the day may not be on sale); nothing changed")
             raise ScrapeError("results page lists no flights at all on a day the calendar priced")
-        if self.promo_code:
-            self.promo_applied = True
+        check_select(payload, origin, dest, day)  # a page for another route or day is not an answer either
         return parse_select(payload, origin, dest, day, member=self.member)

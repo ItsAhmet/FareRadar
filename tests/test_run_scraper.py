@@ -221,7 +221,8 @@ def test_mock_mode_is_avelo_only(isolated):
     assert [r["airline"] for r in database.last_runs(5)] == ["XP"]
 
 
-# ---- alerts are evaluated once per invocation, after every airline (Task 8 fix round 1) ----
+# ---- watches are evaluated once per invocation, after every airline (Task 8 fix round 1); an airline's
+# ---- route signals are pushed right after its run when another airline follows (final review fix) ----
 import alerts
 import signals
 from signals import Event
@@ -231,7 +232,8 @@ BOTH = ["--airlines", "XP,F9", "--origins", "ILG,PHL", "--destinations", "MCO,TP
 
 def _two_airlines(monkeypatch, plan, calls=None):
     """XP and F9 scrapers that return a clean report, or raise when `plan[code]` is an exception; the F9
-    catalog lists PHL⇄MCO; signal detection yields one event per run and alert delivery is recorded."""
+    catalog lists PHL⇄MCO; signal detection yields one event per run; alert delivery is recorded as
+    `deliver` (the final evaluation: run id, signal messages) and `early` (signals pushed between airlines)."""
     def cls_for(code):
         class Fake:
             def __init__(self, **_kw):
@@ -245,7 +247,7 @@ def _two_airlines(monkeypatch, plan, calls=None):
                 return ScrapeReport(attempted=2, succeeded=2, flights_written=3)
         return Fake
 
-    seen = {"detect": [], "deliver": []}
+    seen = {"detect": [], "deliver": [], "early": []}
 
     def detect(run_id, conn=None, allow_sold_out=True):
         seen["detect"].append(run_id)
@@ -259,22 +261,31 @@ def _two_airlines(monkeypatch, plan, calls=None):
             raise plan["deliver"]
         return {"pushed": len(events)}
 
+    def early(events, conn=None):
+        if isinstance(plan.get("early"), BaseException):
+            raise plan["early"]
+        seen["early"].append([e.message for e in events])
+        return {"pushed": len(events)}
+
     monkeypatch.setattr(run_scraper, "scraper_class", cls_for)
     monkeypatch.setattr(frontier, "refresh_catalog", lambda origins, **_k: 0)
     monkeypatch.setattr(signals, "run_detection", detect)
     monkeypatch.setattr(alerts, "evaluate_and_deliver", deliver)
+    monkeypatch.setattr(alerts, "deliver_signals", early)
     database.init_db()
     database.upsert_catalog("F9", [("PHL", "MCO"), ("MCO", "PHL")], "route-page")
     return seen
 
 
-def test_two_airlines_alert_once_with_the_events_of_both_runs(isolated, monkeypatch):
+def test_two_airlines_push_each_signal_once_and_evaluate_watches_once(isolated, monkeypatch):
     seen = _two_airlines(monkeypatch, {})
     assert run_scraper.main(BOTH) == 0
     assert seen["detect"] == [1, 2]
-    assert seen["deliver"] == [(2, ["run1", "run2"])]                     # one call, after the last airline
+    assert seen["early"] == [["run1"]]                                    # Avelo's signals: before Frontier starts
+    assert seen["deliver"] == [(2, ["run2"])]                             # one evaluation, after the last airline
     runs = {r["airline"]: r for r in database.last_runs(5)}
-    assert runs["F9"]["summary"]["alerts"] == {"pushed": 2} and "alerts" not in runs["XP"]["summary"]
+    assert runs["F9"]["summary"]["alerts"] == {"pushed": 1} and "alerts" not in runs["XP"]["summary"]
+    assert runs["XP"]["summary"]["signal_alerts"] == {"pushed": 1} and runs["XP"]["status"] == "ok"
     assert runs["XP"]["summary"]["signals"] == runs["F9"]["summary"]["signals"] == 1
     assert runs["F9"]["status"] == "ok" and runs["F9"]["summary"]["flights_written"] == 3
 
@@ -283,10 +294,48 @@ def test_last_airline_crash_still_alerts_for_the_airlines_that_finished(isolated
     seen = _two_airlines(monkeypatch, {"F9": RuntimeError("chromium failed to launch")})
     assert run_scraper.main(BOTH) == 1
     assert seen["detect"] == [1]                                          # the crashed run detects nothing
-    assert seen["deliver"] == [(2, ["run1"])]                             # Avelo's events are still pushed, once
+    assert seen["early"] == [["run1"]]                                    # Avelo's events are still pushed, once
+    assert seen["deliver"] == [(2, [])]                                   # and watches are still evaluated
     runs = {r["airline"]: r for r in database.last_runs(5)}
     assert runs["XP"]["status"] == "ok" and runs["F9"]["status"] == "failed"
-    assert "chromium" in runs["F9"]["summary"]["error"] and runs["F9"]["summary"]["alerts"] == {"pushed": 1}
+    assert "chromium" in runs["F9"]["summary"]["error"] and runs["F9"]["summary"]["alerts"] == {"pushed": 0}
+
+
+@pytest.mark.parametrize("death", [KeyboardInterrupt(), SystemExit(137)])
+def test_scrape_killed_during_the_second_airline_has_already_pushed_the_first_airlines_signals(isolated, monkeypatch, death):
+    """Dashboard Cancel, its 60-minute timeout or Ctrl-C while Frontier is still scraping. Avelo's run is
+    already finished as 'ok', so the next run takes it as its baseline and never detects that sale again."""
+    seen = _two_airlines(monkeypatch, {"F9": death})
+    with pytest.raises(type(death)):
+        run_scraper.main(BOTH)
+    assert seen["early"] == [["run1"]] and seen["deliver"] == []          # pushed before the kill; no final evaluation
+    runs = {r["airline"]: r for r in database.last_runs(5)}
+    assert runs["XP"]["status"] == "ok" and runs["XP"]["summary"]["signal_alerts"] == {"pushed": 1}
+
+
+def test_one_airline_scrape_still_sends_a_single_combined_alert(isolated, monkeypatch):
+    seen = _two_airlines(monkeypatch, {})
+    assert run_scraper.main(["--airlines", "XP", "--origins", "ILG", "--destinations", "TPA", "--days", "5"]) == 0
+    assert seen["early"] == [] and seen["deliver"] == [(1, ["run1"])]     # signals and watches in one message, as before
+
+
+def test_failed_early_signal_push_is_retried_with_the_final_evaluation(isolated, monkeypatch):
+    seen = _two_airlines(monkeypatch, {"early": RuntimeError("ntfy down")})
+    assert run_scraper.main(BOTH) == 0
+    assert seen["early"] == [] and seen["deliver"] == [(2, ["run1", "run2"])]
+    runs = {r["airline"]: r for r in database.last_runs(5)}
+    assert "signal_alerts" not in runs["XP"]["summary"] and runs["F9"]["status"] == "ok"
+
+
+def test_deliver_signals_pushes_route_signals_on_watched_routes_only(isolated, monkeypatch):
+    database.init_db()
+    sent = []
+    monkeypatch.setattr(alerts, "deliver", lambda pushes: sent.append([e.message for e in pushes]) or alerts.Delivery(pushed=len(pushes)))
+    monkeypatch.setattr(alerts, "watched_routes", lambda conn=None: {("ILG", "TPA")})
+    monkeypatch.setattr(alerts, "evaluate_packages", lambda *_a, **_k: 1 / 0)       # watches are not evaluated here
+    events = [Event("sale_wave", "ILG", "TPA", date(2026, 11, 1), "watched"), Event("sale_wave", "ILG", "LAL", date(2026, 11, 1), "unwatched")]
+    assert alerts.deliver_signals(events) == {"pushed": 1, "ntfy": None, "email": None}
+    assert sent == [["watched"]]
     assert not (isolated / "scrape.lock").exists()
 
 
@@ -296,7 +345,7 @@ def test_signal_detection_crash_in_the_last_airline_still_alerts(isolated, monke
     monkeypatch.setattr(signals, "run_detection",
                         lambda run_id, **k: real(run_id, **k) if run_id == 1 else (_ for _ in ()).throw(RuntimeError("detect")))
     assert run_scraper.main(BOTH) == 1
-    assert seen["deliver"] == [(2, ["run1"])]
+    assert seen["early"] == [["run1"]] and seen["deliver"] == [(2, [])]
 
 
 def test_alert_failure_is_logged_sets_exit_code_and_keeps_the_runs(isolated, monkeypatch):
@@ -312,7 +361,7 @@ def test_alert_failure_is_logged_sets_exit_code_and_keeps_the_runs(isolated, mon
 def test_no_alerts_flag_and_no_run_rows_mean_no_alert_evaluation(isolated, monkeypatch):
     seen = _two_airlines(monkeypatch, {})
     assert run_scraper.main(BOTH + ["--no-alerts"]) == 0
-    assert seen == {"detect": [], "deliver": []}
+    assert seen == {"detect": [], "deliver": [], "early": []}
     # no airline has routes -> no run row -> nothing to evaluate
     assert run_scraper.main(["--airlines", "F9", "--origins", "BWI", "--destinations", "DEN", "--days", "3"]) == 0
     assert seen["deliver"] == [] and len(database.last_runs(5)) == 2

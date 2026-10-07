@@ -229,12 +229,23 @@ def _run(args: argparse.Namespace, log: logging.Logger) -> int:
     work = [(code, routes) for code, routes in work if routes]
 
     exit_code, signal_events, run_ids = 0, [], []
-    for code, routes in work:
+    for index, (code, routes) in enumerate(work):
         log.info("%s: routes=%d (%s) dates=%s..%s", code, len(routes), ",".join(f"{o}-{d}" for o, d in routes), dates[0], dates[-1])
         exit_code = max(exit_code, _run_airline(code, routes, dates, promos.get(code), args, log, signal_events, run_ids))
+        if index < len(work) - 1 and signal_events and not args.no_alerts:
+            # Another airline follows, and it can run for a long time or be killed (dashboard Cancel, the
+            # dashboard's timeout, Ctrl-C). This run is already finished, so the next scrape takes it as its
+            # baseline and will not detect these signals again: push them now. A failure here keeps them
+            # for the evaluation below.
+            try:
+                database.annotate_run(run_ids[-1], {"signal_alerts": alerts.deliver_signals(signal_events)})
+                signal_events.clear()
+            except Exception as exc:  # noqa: BLE001 - the next airline must still be scraped
+                log.exception("signal alerts for %s failed, will retry after the last airline: %s", code, exc)
 
-    # Alerts once per invocation, outside every airline's try block: a crash in one airline's scrape
-    # must not cost the other airlines' signals or the watch/rule/booking checks.
+    # Watches, rules and bookings once per invocation, with the signals not pushed above (the last
+    # airline's; every signal of a one-airline scrape). Outside every airline's try block: a crash in
+    # one airline's scrape must not cost the other airlines' signals or the watch/rule/booking checks.
     if run_ids and not args.no_alerts:
         try:
             database.annotate_run(run_ids[-1], {"alerts": alerts.evaluate_and_deliver(run_ids[-1], signal_events)})
@@ -248,7 +259,8 @@ def _run(args: argparse.Namespace, log: logging.Logger) -> int:
 def _run_airline(code: str, routes: list[tuple[str, str]], dates: list[date], promo: str | None,
                  args: argparse.Namespace, log: logging.Logger, signal_events: list, run_ids: list[int]) -> int:
     """One airline's scrape = one scrape_runs row; its run id is appended to `run_ids` and its signal
-    events to `signal_events`. Alerts are evaluated by `_run`, once, after every airline."""
+    events to `signal_events`. `_run` pushes the signals (at once when another airline follows) and
+    evaluates watches, rules and bookings once, after every airline."""
     run_id = database.start_run("mock" if args.mock else args.mode, routes, promo, airline=code)
     run_ids.append(run_id)
     summary: dict = {}

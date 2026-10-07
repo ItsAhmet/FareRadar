@@ -8,6 +8,7 @@ data/screenshots/
 .pytest_cache/
 data/browser_state.json
 data/browser_state_*.json
+data/browser_state_*.json.tmp
 data/scrape.log
 data/scheduled.log
 

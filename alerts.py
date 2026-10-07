@@ -352,6 +352,19 @@ def deliver(events: list[Event]) -> Delivery:
     return result
 
 
+def deliver_signals(signal_events: list[Event], conn: sqlite3.Connection | None = None) -> dict:
+    """Push one finished run's route signals now, without evaluating watches.
+
+    For a scrape of several airlines: an airline's run is finished (and becomes the next run's baseline)
+    before the next airline starts, so its signals would never be detected again. Pushing them here, not
+    after the last airline, keeps them when the rest of the scrape is cancelled, times out or is killed.
+    """
+    delivery = deliver(select_pushes(signal_events, watched_routes(conn)))
+    summary = {"pushed": delivery.pushed, "ntfy": delivery.ntfy_ok, "email": delivery.email_ok}
+    log.info("signal alerts: %s", json.dumps(summary))
+    return summary
+
+
 def evaluate_and_deliver(run_id: int | None, signal_events: list[Event], conn: sqlite3.Connection | None = None) -> dict:
     """Run after signal detection: evaluate watches, store their events, push."""
     from bookings import evaluate_bookings  # local import avoids a cycle

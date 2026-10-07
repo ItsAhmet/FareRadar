@@ -175,7 +175,9 @@ FRONTIER_CALENDAR_ENDPOINT = "GetLowFareCalendarAvailability"  # POSTed by the c
 FRONTIER_ROUTES_URL = "https://flights.flyfrontier.com/en/flights-from-{slug}"
 FRONTIER_ROUTE_PAGES: dict[str, str] = {"PHL": "philadelphia", "BWI": "baltimore"}  # home airport → page slug
 FRONTIER_SITE_CODES: dict[str, str] = {"PBI": "DJT"}  # app code → the code Frontier's site uses
-FRONTIER_PROBE_DAYS: int = 3  # day searches used to learn whether a route has nonstops
+# Day searches used to learn whether a route has nonstops: one per weekday, because schedules repeat weekly and
+# a route flown nonstop a few days a week is otherwise missed (and then skipped for a month).
+FRONTIER_PROBE_DAYS: int = 7
 
 
 def region_codes(region: str) -> list[str]:
@@ -287,8 +289,8 @@ DELAY_RANGE: tuple[float, float] = (
 MAX_RETRIES: int = 2
 PAGE_TIMEOUT_MS: int = 45_000
 
-# Stealth: cookies/localStorage persist between runs so each visit looks like
-# the same returning visitor instead of a brand-new browser.
+# Stealth: cookies (only cookies, never localStorage) persist between runs so each
+# visit looks like the same returning visitor instead of a brand-new browser.
 STORAGE_STATE_PATH = PROJECT_ROOT / "data" / "browser_state.json"
 
 

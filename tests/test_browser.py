@@ -1,5 +1,6 @@
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 
@@ -91,6 +92,50 @@ def test_snapshot_saves_html_beside_the_screenshot(tmp_path, monkeypatch):
     asyncio.run(s._snapshot("F9-PHL-MCO", 0))
     assert [p.suffix for p in sorted(tmp_path.iterdir())] == [".html", ".png"]
     assert "challenge" in next(tmp_path.glob("*.html")).read_text()
+
+
+def test_snapshot_keeps_the_html_when_the_screenshot_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "SCREENSHOT_DIR", tmp_path / "shots")
+    order = []
+
+    class Page:
+        async def screenshot(self, path, full_page):
+            order.append("png")
+            raise RuntimeError("Protocol error (Page.captureScreenshot): Unable to capture screenshot")
+
+        async def content(self):
+            order.append("html")
+            return '<html><div id="px-captcha"></div></html>'
+
+    s = BaseScraper()
+    s._page = Page()
+    asyncio.run(s._snapshot("F9-PHL-MCO", 0))                                   # best-effort: does not raise
+    assert order == ["html", "png"]
+    assert [p.suffix for p in (tmp_path / "shots").iterdir()] == [".html"]
+    assert "px-captcha" in next((tmp_path / "shots").glob("*.html")).read_text()
+
+
+def test_empty_results_are_snapshotted_but_not_retried():
+    calls, shots = [], []
+    s = BaseScraper(screenshots=False, max_retries=2)
+
+    async def empty():
+        calls.append(1)
+        raise browser.EmptyResults("no flights at all")
+
+    async def snapshot(tag, attempt):
+        shots.append((tag, attempt))
+
+    s._snapshot = snapshot
+    with pytest.raises(browser.EmptyResults):
+        asyncio.run(s._retry(empty, "F9-PHL-MCO-2026-11-13"))
+    assert len(calls) == 1 and shots == [("F9-PHL-MCO-2026-11-13", 0)]
+    assert issubclass(browser.EmptyResults, ScrapeError) and not issubclass(browser.EmptyResults, (BlockedError, DateUnavailable))
+
+
+def test_cookie_temp_file_is_git_ignored():
+    ignored = (Path(__file__).resolve().parent.parent / ".gitignore").read_text().splitlines()
+    assert "data/browser_state_*.json.tmp" in ignored and "data/browser_state_*.json" in ignored
 
 
 def test_report_knows_when_a_run_was_blocked():
