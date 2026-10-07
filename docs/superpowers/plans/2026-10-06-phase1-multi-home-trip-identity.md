@@ -35,7 +35,7 @@
 1. **Watches, rules and bookings saved before this upgrade** (payloads with only `out_id`/`out_dep`, rule state with old-format `matched` keys) must keep resolving and must not push a burst of "new match" alerts on the first run after upgrade. The real database has none of these rows (0 watches, 0 bookings, checked Oct 6 2026), so the evidence is the synthetic tests in Task 6 plus the legacy rows Task 12 Step 1 seeds into a copy. → tests in Task 6, check in Task 12.
 2. **The real database's existing `scrape_runs`** has no `status` column and two runs that never finished (#3 from Sep 8 and #12 from Oct 5; 15 runs in all on Oct 6 2026); migration must add the column, a finished legacy run must still be a valid baseline, the unfinished one must not. → tests in Task 9.
 3. **`AVELO_HOME_AIRPORTS` with lowercase, spaces, duplicates or unknown codes** (`" phl, xyz,PHL "`) should give `["PHL"]`, and garbage should fall back to `["ILG"]`. → test in Task 1.
-4. **A calendar month that is not offered or fails to render** must leave that month's stored fares untouched and must not produce `sold_out` events. → test in Task 7.
+4. **A calendar month that is not offered, fails to render, or renders but parses to zero fares** must leave that month's stored fares untouched and must not produce `sold_out` events. → tests in Task 7 (`persist` leaves uncovered days alone) and Task 8 (the scraper marks an empty month uncovered).
 5. **A stale `scrape.lock` from a crashed run** (dead pid or garbage contents) must not block the next scrape forever. → tests in Task 10.
 
 ---
@@ -1400,7 +1400,8 @@ A search answers "what fares exist for these route-days right now". Anything
 we stored earlier for a covered day that the search no longer shows is gone
 (sold out, retimed, cancelled) and is deleted, so packages, rules and watches
 never offer a fare that cannot be booked. Days the search did not cover (a
-month that failed to render) are left untouched and not recorded.
+month that failed to render, or rendered without one parsed fare) are left
+untouched and not recorded.
 """
 from __future__ import annotations
 
@@ -1417,7 +1418,11 @@ log = logging.getLogger(__name__)
 
 def save_calendar(run_id: int | None, origin: str, dest: str, covered_days: Iterable[date], flights: list[Flight],
                   conn: sqlite3.Connection | None = None) -> int:
-    """Calendar result: one lowest fare per priced day; covered days without a fare are cleared."""
+    """Calendar result: one lowest fare per priced day; covered days without a fare are cleared.
+
+    `covered_days` must hold only days the search positively answered for. A month
+    that rendered but parsed to zero fares is not an answer, so callers leave it out.
+    """
     covered = sorted(set(covered_days))
     priced = {f.departure_date for f in flights}
     written = database.upsert_flights(flights, conn)
@@ -1464,13 +1469,19 @@ git commit -m "feat: persist search results and remove fares that vanished"
 
 **Interfaces:**
 - Consumes: `persist.save_calendar`, `persist.save_day` (Task 7); existing `DateUnavailable`, `ScrapeError`.
-- Produces: `AveloScraper.scrape_lowfare_route(origin, dest, days) -> tuple[list[Flight], list[date]]` (flights, covered days); `_retry` re-raises `DateUnavailable` immediately.
+- Produces: `AveloScraper.scrape_lowfare_route(origin, dest, days) -> tuple[list[Flight], list[date]]` (flights, covered days; a month's days are covered only if at least one fare parsed from that month); `_retry` re-raises `DateUnavailable` immediately.
 
 - [ ] **Step 1: Write the failing test** — append to `tests/test_scraper.py`:
 
 ```python
 import asyncio
+import logging
+import re
+from datetime import date, datetime
 
+import database as db
+import persist
+from models import Flight
 from scraper import AveloScraper, DateUnavailable, ScrapeError
 
 
@@ -1507,14 +1518,109 @@ def test_retry_still_retries_other_scrape_errors(monkeypatch):
     monkeypatch.setattr(s, "_new_page", no_page)
     monkeypatch.setattr(AveloScraper, "page", property(lambda self: type("P", (), {"context": type("C", (), {"browser": None})()})()))
     assert asyncio.run(s._retry(flaky, "t")) == "ok" and len(calls) == 2
+
+
+def _month_grid(month_name, cells):
+    """A month grid. (day, price) is a selectable cell; (day, None) is a disabled cell with the same aria-label."""
+    html = []
+    for day, price in cells:
+        label = f'aria-label="{month_name}, {day:02d} 2026"'
+        if price is None:
+            html.append(f'<td class="day disabled" {label}></td>')
+        else:
+            html.append(f'<td class="day selectable" {label}><div class="price subscription">${price}</div></td>')
+    return "<table>" + "".join(html) + "</table>"
+
+
+class FakeCalendarPage:
+    """Just enough of a Playwright page to walk the Low Fare Calendar's month tabs."""
+
+    def __init__(self, months, current):
+        self.months, self.current = months, current  # {"10-2026": html}
+
+    async def wait_for_url(self, *_a, **_k):
+        return None
+
+    async def wait_for_selector(self, *_a, **_k):
+        return None
+
+    async def wait_for_timeout(self, *_a, **_k):
+        return None
+
+    async def content(self):
+        return self.months[self.current]
+
+    def locator(self, selector):
+        page = self
+        cells = re.match(r"td\.day\[aria-label\^='(\w+), '\]", selector)
+        tab = re.match(r"div\.month\[id='([\d-]+)'\]", selector)
+
+        class Locator:
+            async def count(self):
+                if cells:
+                    return page.months[page.current].count(f'aria-label="{cells.group(1)}, ')
+                return int(tab.group(1) in page.months)
+
+            async def click(self):
+                page.current = tab.group(1)
+
+        return Locator()
+
+
+# October prices Oct 9 and has Oct 12 without a fare (sold out). November renders only disabled cells, as when its
+# fares arrive after the 400 ms pause or the selectors drift: the cells exist, but nothing parses.
+CAL_DAYS = [date(2026, 10, 9), date(2026, 10, 12), date(2026, 11, 5), date(2026, 11, 8)]
+CAL_MONTHS = {
+    "10-2026": _month_grid("October", [(9, 79), (12, None)]),
+    "11-2026": _month_grid("November", [(5, None), (8, None)]),
+}
+
+
+def _calendar_scraper(monkeypatch):
+    s = AveloScraper(screenshots=False)
+
+    async def noop(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(s, "_submit_search", noop)
+    monkeypatch.setattr(s, "_polite_delay", noop)
+    s._page = FakeCalendarPage(dict(CAL_MONTHS), current="10-2026")
+    return s
+
+
+def test_calendar_month_that_renders_without_fares_is_not_covered(monkeypatch, caplog):
+    s = _calendar_scraper(monkeypatch)
+    with caplog.at_level(logging.WARNING, logger="scraper"):
+        flights, covered = asyncio.run(s.scrape_lowfare_route("ILG", "TPA", CAL_DAYS))
+    assert [f.departure_date for f in flights] == [date(2026, 10, 9)]
+    assert covered == [date(2026, 10, 9), date(2026, 10, 12)]  # Oct 12 had no fare (sold out); November is not covered
+    assert "Nov 2026" in caplog.text and "no fares parsed" in caplog.text
+
+
+def test_empty_calendar_month_leaves_stored_rows_and_sightings_untouched(monkeypatch):
+    conn = db.get_connection(":memory:")
+    timed = Flight(origin="ILG", destination="TPA", departure_datetime=datetime(2026, 11, 5, 9), price=70,
+                   duration_minutes=150, flight_id="AVELO-ILG-TPA")
+    db.upsert_flights([timed], conn)
+    run1 = db.start_run("detail", [("ILG", "TPA")], conn=conn)
+    db.record_seen(run1, "ILG", "TPA", [date(2026, 11, 5)], [timed], conn)
+
+    run2 = db.start_run("calendar", [("ILG", "TPA")], conn=conn)
+    flights, covered = asyncio.run(_calendar_scraper(monkeypatch).scrape_lowfare_route("ILG", "TPA", CAL_DAYS))
+    persist.save_calendar(run2, "ILG", "TPA", covered, flights, conn)
+
+    assert db.find_trip("XP|ILG|TPA|2026-11-05|09:00", conn).price == 70  # a pinned timed fare survives the empty month
+    assert db.seen_in_run(run1, "ILG", "TPA", conn) == {date(2026, 11, 5): 70}
+    assert db.seen_in_run(run2, "ILG", "TPA", conn) == {date(2026, 10, 9): 79, date(2026, 10, 12): None}  # no Nov 5 sold-out row
+    conn.close()
 ```
 
-(`pytest` is already imported in that file; add it if not.)
+(`tests/test_scraper.py` has no `import pytest` yet; add it for `pytest.raises`. The fake page matches the exact selectors `scrape_lowfare_route` builds: `td.day[aria-label^='<Month>, ']` and `div.month[id='MM-YYYY']`. November's disabled cells carry the same aria-label as priced ones, which is why that wait cannot prove fares rendered.)
 
 - [ ] **Step 2: Run tests to verify the first fails**
 
 Run: `AVELO_OFFLINE=1 .venv/bin/python -m pytest tests/test_scraper.py -q`
-Expected: `test_retry_does_not_retry_a_sold_out_day` FAILS (3 calls, because `DateUnavailable` is a `ScrapeError`).
+Expected: `test_retry_does_not_retry_a_sold_out_day` FAILS (3 calls, because `DateUnavailable` is a `ScrapeError`). The two calendar tests also FAIL (`not enough values to unpack`) until Step 4 makes `scrape_lowfare_route` return `(flights, covered)`.
 
 - [ ] **Step 3: Implement `_retry` change** — in `scraper.py:452-455` add a clause before the generic one:
 
@@ -1527,13 +1633,22 @@ Expected: `test_retry_does_not_retry_a_sold_out_day` FAILS (3 calls, because `Da
             except (PlaywrightTimeout, ScrapeError) as exc:
 ```
 
-- [ ] **Step 4: Return covered days from the calendar** — in `scrape_lowfare_route` (`scraper.py:638-672`): change the return type to `tuple[list[Flight], list[date]]`, add `covered: list[date] = []` next to `flights: list[Flight] = []`, and after `flights.extend(in_month)` add:
+- [ ] **Step 4: Return covered days from the calendar** — in `scrape_lowfare_route` (`scraper.py:638-672`): change the return type to `tuple[list[Flight], list[date]]`, add `covered: list[date] = []` next to `flights: list[Flight] = []`, and replace `flights.extend(in_month)` with:
 
 ```python
-            covered.extend(d for d in days if (d.year, d.month) == (month.year, month.month))
+            if in_month:
+                flights.extend(in_month)
+                covered.extend(d for d in days if (d.year, d.month) == (month.year, month.month))
+            else:
+                # Rendered but nothing parsed (fares arrived late, markup drift): that is not
+                # "sold out", so the month stays uncovered and its stored fares are left alone.
+                log.warning("%s→%s: month %s rendered but no fares parsed; leaving its stored fares untouched",
+                            origin, dest, f"{month:%b %Y}")
 ```
 
-Change the final line to `return flights, covered`.
+Change the final line to `return flights, covered`. Keep the existing `if not flights: raise ScrapeError(...)` guard: it still fires when every month parses empty.
+
+Do not add a month's days to `covered` unconditionally: `wait_for_selector(month_cells)` also matches disabled cells (`tests/fixtures/lowfare_page.html` has them), so it does not prove fares rendered. A month that is truly sold out is then cleared by the next detail run or the next non-empty calendar run, not by this one (spec §4: days in months that failed to parse are not recorded as sold out).
 
 - [ ] **Step 5: Use `persist` in the run loop** — add `import persist` to the imports. Replace the calendar block body (`scraper.py:339-350`):
 
