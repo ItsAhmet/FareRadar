@@ -14,6 +14,7 @@ Examples
     python run_scraper.py --routes ILG-CHS --headful       # one direction, watch the browser
     python run_scraper.py --mock                           # synthetic data, no network
     python run_scraper.py --destinations CHS --promo SAVE20 # apply a promo code on every search
+    python run_scraper.py --from-rules                     # what saved rules, watches and bookings need (nightly job)
     python run_scraper.py --airlines F9 --origins PHL --destinations MCO --days 21 --mode full
 """
 from __future__ import annotations
@@ -29,6 +30,7 @@ import config
 import database
 import runlock
 import signals
+import trips
 from mock_data import generate_mock_flights, scheduled_days
 
 
@@ -170,6 +172,41 @@ def build_command(
     return cmd
 
 
+def targets_from_rules(conn=None, default_days: int = 60) -> dict:
+    """What the saved rules, watched packages and booked trips need scraped: decided when the job runs,
+    so a rule added today is covered tonight without reinstalling the job."""
+    airline_codes: set[str] = set()
+    origins: set[str] = set()
+    destinations: set[str] = set()
+    days = 0
+    today = date.today()
+    for watch in database.list_watches("rule", conn):
+        p = watch["payload"]
+        airline_codes.update(p.get("airlines") or ["XP"])
+        origins.update(p.get("origins") or [config.PRIMARY_HOME])
+        destinations.update(p.get("destinations", []))
+        days = max(days, int(p.get("span_days", default_days)))
+    payloads = [w["payload"] for w in database.list_watches("package", conn)] + [b["payload"] for b in database.list_bookings(conn)]
+    for p in payloads:
+        for leg in ("out", "in"):
+            key = trips.payload_trip(p, leg)
+            if not key:
+                continue
+            k = trips.parse(key)
+            if k.day < today:
+                continue
+            airline_codes.add(k.airline)
+            home, away = (k.origin, k.destination) if config.is_home(k.origin) else (k.destination, k.origin)
+            origins.add(home)
+            destinations.add(away)
+            days = max(days, (k.day - today).days + 1)
+    if not (airline_codes and origins and destinations):
+        return {"airlines": list(config.ACTIVE_AIRLINES), "origins": list(config.HOME_CODES),
+                "destinations": list(config.DESTINATIONS), "days": default_days}
+    return {"airlines": sorted(airline_codes), "origins": sorted(origins), "destinations": sorted(destinations),
+            "days": max(days, 1)}
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Scrape fares from your home airports (AVELO_HOME_AIRPORTS) into SQLite.")
     p.add_argument("--start", type=date.fromisoformat, default=date.today(), help="First departure date (YYYY-MM-DD)")
@@ -179,6 +216,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--routes", help="Comma list like ILG-TPA,TPA-ILG (overrides --destinations)")
     p.add_argument("--origins", help="Comma list of home airports, e.g. ILG,PHL (default: AVELO_HOME_AIRPORTS)")
     p.add_argument("--airlines", help="Comma list of airline codes: XP (Avelo), F9 (Frontier). Default: AVELO_AIRLINES")
+    p.add_argument("--from-rules", action="store_true",
+                   help="Take airlines, home airports, destinations and days from saved rules, watches and bookings")
     p.add_argument(
         "--mode",
         choices=["calendar", "detail", "full"],
@@ -218,6 +257,14 @@ def _run(args: argparse.Namespace, log: logging.Logger) -> int:
     database.init_db()
     housekeeping = database.maintenance()
     log.info("maintenance: %s", ", ".join(f"{k}={v}" for k, v in housekeeping.items()))
+    if args.from_rules:
+        targets = targets_from_rules()
+        args.airlines = args.airlines or ",".join(targets["airlines"])
+        args.origins = args.origins or ",".join(targets["origins"])
+        args.destinations = args.destinations or ",".join(targets["destinations"])
+        if args.days is None and args.end is None:
+            args.days = targets["days"]
+        log.info("targets from rules: %s", targets)
     dates = build_dates(args.start, args.end, args.days)
     promos = parse_promos(args.promo)
     airline_codes = ["XP"] if args.mock else parse_airlines(args.airlines)  # the mock schedule is Avelo's

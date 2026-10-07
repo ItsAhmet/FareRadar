@@ -4,11 +4,14 @@ import config
 import scheduler
 
 
-def test_job_command_and_cron_line():
-    cmd = scheduler.job_command(["TPA", "LAL"], 45, promo="SAVE20", python="py")
-    assert cmd == ["py", str(config.PROJECT_ROOT / "run_scraper.py"), "--destinations", "TPA,LAL", "--days", "45", "--mode", "calendar", "--promo", "SAVE20"]
-    line = scheduler.cron_line(cmd, 3, 15)
-    assert line.startswith("15 3 * * * cd ") and "--destinations TPA,LAL" in line
+def test_job_command_reads_targets_at_run_time():
+    cmd = scheduler.job_command(mode="calendar", promo="save20", python="py")
+    assert cmd == ["py", str(config.PROJECT_ROOT / "run_scraper.py"), "--from-rules", "--mode", "calendar", "--promo", "save20"]
+
+
+def test_cron_line_runs_the_command_at_the_chosen_time():
+    line = scheduler.cron_line(scheduler.job_command(python="py"), 3, 15)
+    assert line.startswith("15 3 * * * cd ") and "--from-rules --mode calendar" in line
 
 
 def test_render_plist_shape():
@@ -34,12 +37,3 @@ def test_install_on_non_macos_returns_cron_line(monkeypatch):
     monkeypatch.setattr(scheduler, "is_macos", lambda: False)
     result = scheduler.install(["py", "x"], 1, 2)
     assert result["installed"] is False and result["cron"].startswith("2 1 * * *")
-
-
-def test_targets_from_rules_fall_back_to_all_destinations(tmp_path, monkeypatch):
-    import database
-    path = tmp_path / "f.db"
-    monkeypatch.setattr(database, "DB_PATH", path)
-    assert scheduler.targets_from_rules() == (list(config.DESTINATIONS), 60)
-    database.add_watch("rule", "r", {"destinations": ["TPA", "CHS"], "span_days": 30})
-    assert scheduler.targets_from_rules() == (["CHS", "TPA"], 30)

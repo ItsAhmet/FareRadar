@@ -361,11 +361,10 @@ def scheduler_panel() -> None:
         c1, c2 = st.columns(2)
         hour = c1.number_input("Hour", 0, 23, int(status.get("hour") or config.SCHEDULE_HOUR))
         minute = c2.number_input("Minute", 0, 59, int(status.get("minute") or config.SCHEDULE_MINUTE), step=5)
-        dests, days = scheduler.targets_from_rules()
-        st.caption(f"Job will scrape {len(dests)} destination(s) for {days} days (from your saved rules).")
+        st.caption("Job targets follow your saved rules, watches and bookings.")
         b1, b2 = st.columns(2)
         if b1.button("Install / update", key="sched_install"):
-            result = scheduler.install(scheduler.job_command(dests, days), int(hour), int(minute))
+            result = scheduler.install(scheduler.job_command(), int(hour), int(minute))
             if result.get("installed"):
                 st.success(f"Scheduled daily at {int(hour):02d}:{int(minute):02d}")
             elif result.get("cron"):

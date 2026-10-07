@@ -1,8 +1,8 @@
 """Unattended nightly scrapes.
 
 macOS: a launchd user agent (`~/Library/LaunchAgents/<label>.plist`) that runs
-`run_scraper.py` at the chosen time with the destinations and span the saved
-rules need. Elsewhere: the equivalent cron line is returned for the user to
+`run_scraper.py --from-rules` at the chosen time, so each run covers what the
+saved rules, watches and bookings need that night. Elsewhere: the equivalent cron line is returned for the user to
 paste. The job's own log goes to data/scheduled.log.
 """
 from __future__ import annotations
@@ -15,7 +15,6 @@ import sys
 from pathlib import Path
 
 import config
-import database
 
 
 def plist_path() -> Path:
@@ -26,26 +25,9 @@ def job_log() -> Path:
     return config.PROJECT_ROOT / "data" / "scheduled.log"
 
 
-def targets_from_rules(default_days: int = 60) -> tuple[list[str], int]:
-    """Union of the saved rules' destinations and the longest span; falls back
-    to every destination when no rules exist."""
-    dests: set[str] = set()
-    days = 0
-    for watch in database.list_watches("rule"):
-        dests.update(watch["payload"].get("destinations", []))
-        days = max(days, int(watch["payload"].get("span_days", default_days)))
-    return (sorted(dests) or list(config.DESTINATIONS)), (days or default_days)
-
-
-def job_command(destinations: list[str], days: int, mode: str = "calendar", promo: str | None = None,
-                python: str | None = None) -> list[str]:
-    cmd = [
-        python or sys.executable,
-        str(config.PROJECT_ROOT / "run_scraper.py"),
-        "--destinations", ",".join(destinations),
-        "--days", str(days),
-        "--mode", mode,
-    ]
+def job_command(mode: str = "calendar", promo: str | None = None, python: str | None = None) -> list[str]:
+    """The targets are not baked in: `--from-rules` reads rules, watches and bookings when the job runs."""
+    cmd = [python or sys.executable, str(config.PROJECT_ROOT / "run_scraper.py"), "--from-rules", "--mode", mode]
     if promo:
         cmd += ["--promo", promo]
     return cmd

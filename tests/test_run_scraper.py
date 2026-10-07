@@ -437,3 +437,36 @@ def test_routes_flag_with_one_airline_is_taken_as_given(isolated, monkeypatch):
     assert run_scraper.main(["--airlines", "F9", "--routes", "ILG-TPA", "--days", "3", "--no-alerts"]) == 0
     assert run_scraper.main(["--routes", "PHL-DEN", "--days", "3", "--no-alerts"]) == 0
     assert calls == [("F9", [("ILG", "TPA")]), ("XP", [("PHL", "DEN")])]
+
+
+def test_targets_come_from_rules_watches_and_bookings(isolated):
+    import alerts
+    from optimizer import Availability
+    from datetime import time
+
+    database.init_db()
+    assert run_scraper.targets_from_rules() == {"airlines": list(config.ACTIVE_AIRLINES), "origins": list(config.HOME_CODES),
+                                                "destinations": list(config.DESTINATIONS), "days": 60}
+    av = Availability(2, time(18), 6, time(23, 59))
+    database.add_watch("rule", "r1", alerts.rule_payload(["TPA"], av, 1, 300, True, 100, span_days=30, origins=["ILG"], airlines=["XP"]))
+    database.add_watch("rule", "r2", alerts.rule_payload(["MCO", "DEN"], av, 1, 300, True, 100, span_days=45, origins=["PHL"], airlines=["F9"]))
+    database.add_watch("package", "w", {"out_trip": "F9|BWI|LAS|2026-12-01|*", "in_trip": "F9|LAS|BWI|2026-12-05|*"})
+    database.add_booking("b", {"out_trip": "XP|ILG|SRQ|2026-11-20|08:00", "in_trip": "XP|SRQ|ILG|2026-11-23|15:00"}, 100)
+    t = run_scraper.targets_from_rules()
+    assert t["airlines"] == ["F9", "XP"] and t["origins"] == ["BWI", "ILG", "PHL"]
+    assert t["destinations"] == ["DEN", "LAS", "MCO", "SRQ", "TPA"] and t["days"] >= 45
+
+
+def test_from_rules_flag_fills_the_request(isolated, monkeypatch):
+    monkeypatch.setattr(run_scraper, "targets_from_rules", lambda **_k: {"airlines": ["F9"], "origins": ["PHL"], "destinations": ["MCO"], "days": 21})
+    seen = {}
+
+    def fake_routes_for(airline, args, *rest):
+        seen.update(airline=airline, origins=args.origins, destinations=args.destinations, days=args.days)
+        return []
+
+    monkeypatch.setattr(run_scraper, "routes_for", fake_routes_for)
+    assert run_scraper.main(["--from-rules", "--no-alerts"]) == 0
+    assert seen == {"airline": "F9", "origins": "PHL", "destinations": "MCO", "days": 21}
+    run_scraper.main(["--from-rules", "--no-alerts", "--days", "7", "--airlines", "F9"])
+    assert seen["days"] == 7                                         # an explicit flag wins
