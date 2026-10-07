@@ -346,15 +346,23 @@ def prune_history(conn: sqlite3.Connection | None = None, now: datetime | None =
 
 def drop_shadowed_placeholders(origin: str, destination: str, conn: sqlite3.Connection | None = None,
                                airline: str = "XP") -> int:
-    """Remove an airline's calendar placeholders (no arrival time) on days where the
-    same airline already has timed rows, so a calendar run after a detail run never
-    duplicates a flight."""
+    """Remove an airline's calendar placeholders on days where the same airline
+    already has a real (timed) row, so a calendar run after a detail run never
+    duplicates a flight.
+
+    A placeholder is a row with no arrival time stored at 00:00 (calendar rows have
+    no clock time). A detail row that merely lacks an arrival (a card showing one
+    time and no duration) departs at its real time, so it is neither deleted nor
+    ignored as a shadow.
+    """
     sql = """
         DELETE FROM avelo_flights
-        WHERE airline = ? AND origin = ? AND destination = ? AND arrival_datetime IS NULL
+        WHERE airline = ? AND origin = ? AND destination = ?
+          AND arrival_datetime IS NULL AND substr(departure_datetime, 12, 5) = '00:00'
           AND substr(departure_datetime, 1, 10) IN (
               SELECT substr(departure_datetime, 1, 10) FROM avelo_flights
-              WHERE airline = ? AND origin = ? AND destination = ? AND arrival_datetime IS NOT NULL
+              WHERE airline = ? AND origin = ? AND destination = ?
+                AND (arrival_datetime IS NOT NULL OR substr(departure_datetime, 12, 5) <> '00:00')
           )
     """
     a, o, d = airline.upper(), origin.upper(), destination.upper()

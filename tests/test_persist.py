@@ -4,6 +4,7 @@ import pytest
 
 import database as db
 import persist
+import scraper
 from models import Flight
 
 
@@ -101,3 +102,35 @@ def test_placeholders_are_shadowed_only_by_their_own_airline(conn):
     db.upsert_flights([f9_timed(10, 9, 60)], conn)
     persist.save_calendar(None, "ILG", "TPA", [date(2026, 10, 10)], [f9_cal(10, 50)], conn, airline="F9")
     assert airlines_on(conn, 10) == [("F9", "F9-77-ILG-TPA"), ("XP", "AVELO-ILG-TPA")]   # F9 placeholder shadowed
+
+
+ONE_TIME_CARD = (
+    '<button class="flight-block-wrapper-v2"><div class="scheduled-time">7:05 PM</div>'
+    '<div class="fare-prices"><div class="fare standard"><span class="price">$129</span></div></div></button>'
+)
+TWO_TIME_CARD = (
+    '<button class="flight-block-wrapper-v2"><div class="scheduled-time">8:00 AM</div>'
+    '<div class="scheduled-time">10:37 AM</div><div class="flight-block-duration">2h 37m Nonstop</div>'
+    '<div class="fare-prices"><div class="fare standard"><span class="price">$99</span></div></div></button>'
+)
+
+
+def stored_departures(conn):
+    return [r[0] for r in conn.execute("SELECT departure_datetime FROM avelo_flights ORDER BY departure_datetime")]
+
+
+def test_one_time_detail_row_survives_a_calendar_run_when_a_sibling_has_times(conn):
+    day = date(2026, 10, 10)
+    flights = scraper.parse_select_page(TWO_TIME_CARD + ONE_TIME_CARD, "ILG", "TPA", day)
+    assert len(flights) == 2
+    persist.save_day(None, "ILG", "TPA", day, flights, conn)
+    persist.save_calendar(None, "ILG", "TPA", [day], [cal(10, 99)], conn)
+    assert stored_departures(conn) == ["2026-10-10T08:00", "2026-10-10T19:05"]
+
+
+def test_one_time_detail_row_still_shadows_the_calendar_placeholder(conn):
+    day = date(2026, 10, 10)
+    flights = scraper.parse_select_page(ONE_TIME_CARD, "ILG", "TPA", day)
+    persist.save_day(None, "ILG", "TPA", day, flights, conn)
+    persist.save_calendar(None, "ILG", "TPA", [day], [cal(10, 129)], conn)
+    assert [r[0] for r in conn.execute("SELECT flight_id FROM avelo_flights")] == ["AVELO-ILG-TPA"]
