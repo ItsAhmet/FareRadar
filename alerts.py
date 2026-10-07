@@ -28,13 +28,38 @@ import database
 import trips
 from models import Flight
 from optimizer import (Availability, GetawayQuery, Itinerary, Window, find_itineraries, inbound_fits,
-                       outbound_fits, rank_by_price)
+                       intersect_windows, outbound_fits, rank_by_price)
 from netutil import open_url
 from signals import Event
 
 log = logging.getLogger(__name__)
 
 ROUTE_SIGNALS = {"sale_wave", "sold_out", "floor_gone", "new_floor"}
+
+
+@dataclass(frozen=True)
+class StateWrite:
+    """A watch/booking state update waiting for its alert to be delivered."""
+
+    kind: str        # "watch" | "booking"
+    row_id: int
+    state: dict
+    alerting: bool   # True when this state records an alert the owner must actually receive first
+
+
+def apply_writes(writes: list[StateWrite], delivered: bool, conn: sqlite3.Connection | None = None) -> int:
+    """Store the pending states. Alerting ones are skipped when the push failed, so the next run raises
+    the same alert again instead of losing it."""
+    applied = 0
+    for w in writes:
+        if w.alerting and not delivered:
+            continue
+        if w.kind == "watch":
+            database.update_watch_state(w.row_id, w.state, conn)
+        else:
+            database.update_booking_state(w.row_id, w.state, conn)
+        applied += 1
+    return applied
 
 
 # --------------------------------------------------------------------------- #
@@ -80,6 +105,9 @@ def rule_payload(
     holiday_extend: bool = False,
     origins: list[str] | None = None,
     allow_open_jaw: bool = False,
+    airlines: list[str] | None = None,
+    partner: Availability | None = None,
+    count_carry_on: bool = False,
 ) -> dict:
     return {
         "holiday_extend": holiday_extend,
@@ -95,6 +123,12 @@ def rule_payload(
         "allow_mix": allow_mix,
         "max_pair_miles": max_pair_miles,
         "span_days": span_days,
+        "airlines": sorted({a.strip().upper() for a in (airlines or config.KNOWN_AIRLINES)}),
+        "count_carry_on": bool(count_carry_on),
+        "partner": None if partner is None else {
+            "start_weekday": partner.start_weekday, "start_time": partner.start_time.strftime("%H:%M"),
+            "end_weekday": partner.end_weekday, "end_time": partner.end_time.strftime("%H:%M"),
+        },
     }
 
 
@@ -106,6 +140,13 @@ def rule_query(payload: dict, today: date | None = None) -> GetawayQuery | None:
     )
     windows = av.windows(today + timedelta(days=1), today + timedelta(days=int(payload.get("span_days", 60))),
                          holiday_extend=bool(payload.get("holiday_extend", False)))
+    p = payload.get("partner")
+    if p:
+        theirs = Availability(p["start_weekday"], time.fromisoformat(p["start_time"]),
+                              p["end_weekday"], time.fromisoformat(p["end_time"]))
+        windows = intersect_windows(windows, theirs.windows(today + timedelta(days=1),
+                                                            today + timedelta(days=int(payload.get("span_days", 60))),
+                                                            holiday_extend=bool(payload.get("holiday_extend", False))))
     if not windows or not payload["destinations"]:
         return None
     return GetawayQuery(
@@ -117,6 +158,8 @@ def rule_query(payload: dict, today: date | None = None) -> GetawayQuery | None:
         max_pair_miles=float(payload["max_pair_miles"]),
         origins=list(payload.get("origins") or [config.PRIMARY_HOME]),
         allow_open_jaw=bool(payload.get("allow_open_jaw", False)),
+        airlines=set(payload.get("airlines") or ["XP"]),   # rules saved before airlines existed meant Avelo
+        count_carry_on=bool(payload.get("count_carry_on", False)),
     )
 
 
@@ -180,42 +223,58 @@ def package_legs(payload: dict, conn: sqlite3.Connection | None = None) -> tuple
     return (outs[0] if outs else None), None
 
 
-def evaluate_packages(conn: sqlite3.Connection | None = None) -> list[Event]:
+def pending_packages(conn: sqlite3.Connection | None = None) -> tuple[list[Event], list[StateWrite]]:
     events: list[Event] = []
+    writes: list[StateWrite] = []
     for watch in database.list_watches("package", conn):
         key, state = watch["payload"], dict(watch["state"])
         out_k, in_k = trips.payload_trip(key, "out"), trips.payload_trip(key, "in")
         out, back = package_legs(key, conn)
         if out is None or back is None:
-            if not state.get("unavailable"):
+            alerting = not state.get("unavailable")
+            if alerting:
                 events.append(Event("watch_unavailable", None, key.get("destination"), None,
                                     f"Watched package {watch['label']} is no longer available",
                                     {"watch_id": watch["watch_id"]}))
-            state["unavailable"] = True
-            database.update_watch_state(watch["watch_id"], state, conn)
+            writes.append(StateWrite("watch", watch["watch_id"], {**state, "unavailable": True}, alerting))
             continue
         total = round(out.price + back.price, 2)
-        last = state.get("last_total")
-        if last is not None:
-            drop = last - total
-            if drop >= config.ALERT_MIN_DROP_USD or (last and drop / last >= config.ALERT_MIN_DROP_PCT):
+        base = state.get("alert_base", state.get("last_total"))   # what the owner was last told (or first saw)
+        alerting = False
+        if base is None:
+            base = total
+        else:
+            drop = base - total
+            if drop >= config.ALERT_MIN_DROP_USD or (base and drop / base >= config.ALERT_MIN_DROP_PCT):
                 events.append(Event("price_drop", out.origin, out.destination, out.departure_date,
                                     f"Watched: {watch['label']} dropped ${drop:.0f} to ${total:.0f}",
-                                    {"watch_id": watch["watch_id"], "from": last, "to": total}))
-            elif total - last >= config.ALERT_MIN_DROP_USD:
+                                    {"watch_id": watch["watch_id"], "from": base, "to": total}, airline=out.airline))
+                base, alerting = total, True
+            elif total - base >= config.ALERT_MIN_DROP_USD:
                 events.append(Event("price_rise", out.origin, out.destination, out.departure_date,
-                                    f"Watched: {watch['label']} rose ${total - last:.0f} to ${total:.0f}",
-                                    {"watch_id": watch["watch_id"], "from": last, "to": total}, notify=False))
+                                    f"Watched: {watch['label']} rose ${total - base:.0f} to ${total:.0f}",
+                                    {"watch_id": watch["watch_id"], "from": base, "to": total}, notify=False,
+                                    airline=out.airline))
+                base = total                                         # later drops are measured from the new level
         upgraded = {**key, "out_trip": trips.upgrade(out_k, out), "in_trip": trips.upgrade(in_k, back)}
         if upgraded != key:
             database.update_watch_payload(watch["watch_id"], upgraded, conn)
-        state.update({"last_total": total, "unavailable": False, "checked_at": datetime.now().isoformat(timespec="seconds")})
-        database.update_watch_state(watch["watch_id"], state, conn)
+        writes.append(StateWrite("watch", watch["watch_id"],
+                                 {**state, "last_total": total, "alert_base": base, "unavailable": False,
+                                  "checked_at": datetime.now().isoformat(timespec="seconds")}, alerting))
+    return events, writes
+
+
+def evaluate_packages(conn: sqlite3.Connection | None = None) -> list[Event]:
+    events, writes = pending_packages(conn)
+    apply_writes(writes, True, conn)
     return events
 
 
-def evaluate_rules(conn: sqlite3.Connection | None = None, today: date | None = None, max_new: int = 3) -> list[Event]:
+def pending_rules(conn: sqlite3.Connection | None = None, today: date | None = None,
+                  max_new: int = 3) -> tuple[list[Event], list[StateWrite]]:
     events: list[Event] = []
+    writes: list[StateWrite] = []
     for watch in database.list_watches("rule", conn):
         query = rule_query(watch["payload"], today)
         state = dict(watch["state"])
@@ -234,14 +293,21 @@ def evaluate_rules(conn: sqlite3.Connection | None = None, today: date | None = 
             it = keys[k]
             events.append(Event("rule_match", it.outbound.origin, it.outbound.destination, it.outbound.departure_date,
                                 f"Rule '{watch['label']}': {package_label(it)} for ${it.total_price:.0f}",
-                                {"watch_id": watch["watch_id"], "package": package_key(it), "total": it.total_price}))
+                                {"watch_id": watch["watch_id"], "package": package_key(it), "total": it.total_price},
+                                airline=it.outbound.airline))
         if len(new_keys) > max_new:
             events.append(Event("rule_match", None, None, None,
                                 f"Rule '{watch['label']}': {len(new_keys) - max_new} more new matches in the app",
                                 {"watch_id": watch["watch_id"], "extra": len(new_keys) - max_new}))
-        state.update({"matched": sorted(keys), "checked_at": datetime.now().isoformat(timespec="seconds"),
-                      "match_count": len(keys), "key_version": 2})
-        database.update_watch_state(watch["watch_id"], state, conn)
+        writes.append(StateWrite("watch", watch["watch_id"],
+                                 {**state, "matched": sorted(keys), "checked_at": datetime.now().isoformat(timespec="seconds"),
+                                  "match_count": len(keys), "key_version": 2}, alerting=bool(new_keys)))
+    return events, writes
+
+
+def evaluate_rules(conn: sqlite3.Connection | None = None, today: date | None = None, max_new: int = 3) -> list[Event]:
+    events, writes = pending_rules(conn, today, max_new)
+    apply_writes(writes, True, conn)
     return events
 
 
@@ -293,6 +359,12 @@ class Delivery:
     pushed: int = 0
     ntfy_ok: bool | None = None
     email_ok: bool | None = None
+
+    @property
+    def delivered(self) -> bool:
+        """Nothing to send, no channel configured (the in-app feed is the delivery), or a channel succeeded."""
+        outcomes = [o for o in (self.ntfy_ok, self.email_ok) if o is not None]
+        return self.pushed == 0 or not outcomes or any(outcomes)
 
 
 def build_message(events: list[Event]) -> tuple[str, str]:
@@ -378,18 +450,26 @@ def deliver_signals(signal_events: list[Event], conn: sqlite3.Connection | None 
 
 
 def evaluate_and_deliver(run_id: int | None, signal_events: list[Event], conn: sqlite3.Connection | None = None) -> dict:
-    """Run after signal detection: evaluate watches, store their events, push."""
-    from bookings import evaluate_bookings  # local import avoids a cycle
+    """Run after signal detection: evaluate watches, push, and only then record what was announced."""
+    from bookings import pending_bookings  # local import avoids a cycle
 
-    watch_events = evaluate_packages(conn) + evaluate_rules(conn) + evaluate_bookings(conn)
-    database.add_events(run_id, watch_events, conn)
+    watch_events: list[Event] = []
+    writes: list[StateWrite] = []
+    for pending in (pending_packages, pending_rules, pending_bookings):
+        events, state_writes = pending(conn)
+        watch_events += events
+        writes += state_writes
     pushes = select_pushes(signal_events + watch_events, watched_routes(conn))
     delivery = deliver(pushes)
+    if delivery.delivered:
+        database.add_events(run_id, watch_events, conn)      # the feed shows an alert once, when it was announced
+    apply_writes(writes, delivery.delivered, conn)
     summary = {
         "watch_events": len(watch_events),
         "pushed": delivery.pushed,
         "ntfy": delivery.ntfy_ok,
         "email": delivery.email_ok,
+        "delivered": delivery.delivered,
     }
     log.info("alerts: %s", json.dumps(summary))
     return summary

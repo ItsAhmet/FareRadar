@@ -296,18 +296,6 @@ def test_route_signal_without_an_airline_counts_as_avelo(conn):
     assert alerts.select_pushes([old], {("F9", "PHL", "MCO")}) == []
 
 
-def test_route_signals_are_pushed_only_for_the_watched_airline(conn):
-    db.add_watch("rule", "Frontier Orlando", {"origins": ["PHL"], "destinations": ["MCO"], "airlines": ["F9"]}, conn=conn)
-    watched = alerts.watched_routes(conn)
-    assert ("F9", "PHL", "MCO") in watched and ("XP", "PHL", "MCO") not in watched
-    f9_sale = Event("sale_wave", "PHL", "MCO", date(2026, 11, 12), "Frontier PHL→MCO: sale wave", airline="F9")
-    xp_sale = Event("sale_wave", "PHL", "MCO", date(2026, 11, 12), "Avelo PHL→MCO: sale wave", airline="XP")
-    assert alerts.select_pushes([f9_sale, xp_sale], watched) == [f9_sale]
-    assert alerts.build_message([f9_sale])[0] == "Frontier sale on a watched route"
-    assert alerts.build_message([f9_sale, xp_sale])[0] == "Avelo & Frontier sale on a watched route"
-    assert alerts.build_message([Event("booked_drop", None, "TPA", None, "m")])[0] == "A booked trip got cheaper"
-
-
 def test_package_watch_watches_its_legs_airline(conn):
     db.add_watch("package", "p", {"out_trip": "F9|PHL|MCO|2026-11-12|07:00", "in_trip": "XP|MCO|ILG|2026-11-15|*"}, conn=conn)
     assert alerts.watched_routes(conn) == {("F9", "PHL", "MCO"), ("XP", "MCO", "ILG")}
@@ -326,3 +314,109 @@ def test_watch_from_carry_on_counted_search_does_not_fake_a_price_drop(conn, mon
     wid, _ = alerts.watch_package(it, conn)
     assert db.list_watches("package", conn)[0]["state"]["last_total"] == 180
     assert alerts.evaluate_packages(conn) == []  # fares unchanged -> no event
+
+
+def watched(conn, out_price=100, back_price=80):
+    out, back = f("ILG", "TPA", 8, 8, out_price), f("TPA", "ILG", 11, 15, back_price)
+    db.upsert_flights([out, back], conn)
+    (it,) = build_itineraries([out], [back], GetawayQuery({"TPA"}, [WINDOW], origins=["ILG"]))
+    wid, _ = alerts.watch_package(it, conn)
+    return wid
+
+
+def reprice(conn, out_price):
+    db.upsert_flights([f("ILG", "TPA", 8, 8, out_price)], conn)
+
+
+def test_gradual_drops_add_up_to_an_alert(conn):
+    wid = watched(conn)                                   # total 180, alert_base 180
+    seen = []
+    for price in (98, 96, 95):                            # totals 178, 176, 175: never $5 in one step
+        reprice(conn, price)
+        seen.append([e.kind for e in alerts.evaluate_packages(conn)])
+    assert seen == [[], [], ["price_drop"]]               # $5 below what the owner last knew: 180 → 175
+    state = db.list_watches("package", conn)[0]["state"]
+    assert state["alert_base"] == 175 and state["last_total"] == 175
+    reprice(conn, 94)
+    assert alerts.evaluate_packages(conn) == []           # only $1 below what was announced
+
+
+def test_legacy_watch_state_gets_a_base_without_alerting(conn):
+    wid = watched(conn)
+    db.update_watch_state(wid, {"last_total": 180.0}, conn)        # state written before alert_base existed
+    assert alerts.evaluate_packages(conn) == []
+    assert db.list_watches("package", conn)[0]["state"]["alert_base"] == 180.0
+
+
+def test_a_failed_push_is_retried_on_the_next_run(conn, monkeypatch):
+    monkeypatch.setattr(config, "OFFLINE", False)
+    monkeypatch.setattr(config, "NTFY_TOPIC", "test-topic")
+    monkeypatch.setattr(config, "SMTP_HOST", "")
+    sent = []
+    outcome = {"ok": False}
+
+    def fake_ntfy(title, body, topic=None, server=None):
+        sent.append(title)
+        return outcome["ok"]
+
+    monkeypatch.setattr(alerts, "notify_ntfy", fake_ntfy)
+    watched(conn)
+    reprice(conn, 80)                                               # 180 → 160
+    first = alerts.evaluate_and_deliver(None, [], conn)
+    state = db.list_watches("package", conn)[0]["state"]
+    assert first["ntfy"] is False and state["last_total"] == 180 and state.get("alert_base", 180) == 180   # nothing recorded
+    outcome["ok"] = True
+    second = alerts.evaluate_and_deliver(None, [], conn)
+    assert second["ntfy"] is True and len(sent) == 2
+    assert db.list_watches("package", conn)[0]["state"]["alert_base"] == 160
+    third = alerts.evaluate_and_deliver(None, [], conn)
+    assert third["pushed"] == 0 and len(sent) == 2                  # announced once, not again
+
+
+def test_no_push_channel_still_records_the_alert(conn, monkeypatch):
+    monkeypatch.setattr(config, "NTFY_TOPIC", "")
+    monkeypatch.setattr(config, "SMTP_HOST", "")
+    watched(conn)
+    reprice(conn, 80)
+    alerts.evaluate_and_deliver(None, [], conn)
+    assert db.list_watches("package", conn)[0]["state"]["alert_base"] == 160    # in-app feed is the delivery
+
+
+def test_rules_carry_airlines_and_the_partner_window(conn):
+    mine, partner = Availability(2, time(18), 6, time(23, 59)), Availability(4, time(17), 6, time(20))
+    payload = alerts.rule_payload(["TPA"], mine, 1, 300, True, 100, span_days=14, origins=["ILG"],
+                                  airlines=["f9", "XP"], partner=partner, count_carry_on=True)
+    assert payload["airlines"] == ["F9", "XP"] and payload["partner"]["start_weekday"] == 4 and payload["count_carry_on"]
+    q = alerts.rule_query(payload, today=date(2026, 10, 1))
+    assert q.airlines == {"XP", "F9"} and q.count_carry_on
+    assert q.windows[0].start == datetime(2026, 10, 9, 17) and q.windows[0].end == datetime(2026, 10, 11, 20)   # both free
+    old = {k: v for k, v in payload.items() if k not in ("airlines", "partner", "count_carry_on")}
+    legacy = alerts.rule_query(old, today=date(2026, 10, 1))
+    assert legacy.airlines == {"XP"} and legacy.windows[0].start == datetime(2026, 10, 7, 18)
+
+
+def test_old_rule_is_not_flooded_by_frontier_packages(conn):
+    db.upsert_flights([f("ILG", "TPA", 8, 8, 100), f("TPA", "ILG", 11, 15, 80)], conn)
+    old = {k: v for k, v in alerts.rule_payload(["TPA"], Availability(2, time(18), 6, time(23, 59)), 1, 300, True, 100,
+                                                span_days=14).items() if k not in ("airlines", "partner", "count_carry_on")}
+    db.add_watch("rule", "Tampa", old, conn)
+    today = date(2026, 10, 1)
+    assert len(alerts.evaluate_rules(conn, today=today)) == 1
+    db.upsert_flights([Flight(airline="F9", origin="PHL", destination="TPA", departure_datetime=datetime(2026, 10, 8, 9), price=40,
+                              duration_minutes=150, flight_id="F9-1-PHL-TPA"),
+                       Flight(airline="F9", origin="TPA", destination="PHL", departure_datetime=datetime(2026, 10, 11, 16), price=40,
+                              duration_minutes=150, flight_id="F9-2-TPA-PHL")], conn)
+    assert alerts.evaluate_rules(conn, today=today) == []           # a pre-phase-3 rule stays Avelo-only
+
+
+def test_route_signals_are_pushed_only_for_the_watched_airline(conn):
+    payload = alerts.rule_payload(["MCO"], Availability(2, time(18), 6, time(23, 59)), 1, 300, True, 100, origins=["PHL"], airlines=["F9"])
+    db.add_watch("rule", "Frontier Orlando", payload, conn)
+    watched_set = alerts.watched_routes(conn)
+    assert ("F9", "PHL", "MCO") in watched_set and ("XP", "PHL", "MCO") not in watched_set
+    f9_sale = Event("sale_wave", "PHL", "MCO", date(2026, 11, 12), "Frontier PHL→MCO: sale wave", airline="F9")
+    xp_sale = Event("sale_wave", "PHL", "MCO", date(2026, 11, 12), "Avelo PHL→MCO: sale wave", airline="XP")
+    assert alerts.select_pushes([f9_sale, xp_sale], watched_set) == [f9_sale]
+    assert alerts.build_message([f9_sale])[0] == "Frontier sale on a watched route"
+    assert alerts.build_message([f9_sale, xp_sale])[0] == "Avelo & Frontier sale on a watched route"
+    assert alerts.build_message([Event("booked_drop", None, "TPA", None, "m")])[0] == "A booked trip got cheaper"

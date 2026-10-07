@@ -308,7 +308,7 @@ def sidebar() -> tuple[GetawayQuery | None, list[str], tuple[date, date], str, d
         "destinations": destinations, "availability": availability, "min_nights": min_nights,
         "max_budget": float(budget), "allow_mix": allow_mix, "max_pair_miles": float(max_pair),
         "span_days": (span_end - date.today()).days, "holiday_extend": holiday_extend,
-        "origins": list(config.HOME_CODES), "allow_open_jaw": False,
+        "origins": list(config.HOME_CODES), "allow_open_jaw": False, "partner": partner,
     }
     st.session_state.place_mode = {"place": place, "drives": drives, "value": float(drive_value)}
     windows = availability.windows(span_start, span_end, holiday_extend=holiday_extend)
@@ -344,6 +344,7 @@ def rule_panel() -> None:
                 f["destinations"], f["availability"], f["min_nights"], f["max_budget"], f["allow_mix"],
                 f["max_pair_miles"], max(f["span_days"], 7), holiday_extend=f.get("holiday_extend", False),
                 origins=f.get("origins"), allow_open_jaw=f.get("allow_open_jaw", False),
+                airlines=sorted(config.KNOWN_AIRLINES), partner=f.get("partner"), count_carry_on=False,
             )
             database.add_watch("rule", label.strip(), payload)
             st.success(f"Saved rule '{label.strip()}'. You'll be alerted when new packages match.")

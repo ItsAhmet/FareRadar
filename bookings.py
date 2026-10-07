@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 import config
 import database
@@ -17,6 +18,9 @@ import trips
 from models import Flight
 from optimizer import Itinerary
 from signals import Event
+
+if TYPE_CHECKING:
+    from alerts import StateWrite
 
 
 def booking_payload(it: Itinerary) -> dict:
@@ -63,9 +67,15 @@ def current_total(payload: dict, conn: sqlite3.Connection | None = None) -> floa
     return round(out.price + back.price, 2)
 
 
-def evaluate_bookings(conn: sqlite3.Connection | None = None) -> list[Event]:
-    """Compare each booking with today's fares; alert on meaningful drops once."""
+def pending_bookings(conn: sqlite3.Connection | None = None) -> tuple[list[Event], list[StateWrite]]:
+    """Compare each booking with today's fares; alert on meaningful drops once.
+
+    Returns the events and the state each booking should get. The state that records a drop alert is
+    marked alerting, so `alerts.apply_writes` stores it only once the push was delivered."""
+    from alerts import StateWrite  # local import, as in booking_payload
+
     events: list[Event] = []
+    writes: list[StateWrite] = []
     for b in database.list_bookings(conn):
         state = dict(b["state"])
         payload = b["payload"]
@@ -77,13 +87,13 @@ def evaluate_bookings(conn: sqlite3.Connection | None = None) -> list[Event]:
             if upgraded != payload:
                 database.update_booking_payload(b["booking_id"], upgraded, conn)
         if now_total is None:
-            state["current_total"] = None
-            database.update_booking_state(b["booking_id"], state, conn)
+            writes.append(StateWrite("booking", b["booking_id"], {**state, "current_total": None}, False))
             continue
         paid = float(b["price_paid"])
         drop = round(paid - now_total, 2)
         alerted_at = state.get("alerted_total")
-        if drop >= config.BOOKED_DROP_ALERT_USD and (alerted_at is None or now_total < alerted_at - 0.5):
+        alerting = drop >= config.BOOKED_DROP_ALERT_USD and (alerted_at is None or now_total < alerted_at - 0.5)
+        if alerting:
             events.append(Event("booked_drop", None, b["payload"].get("destination"), None,
                                 f"Booked {b['label']} is now ${now_total:.0f}, you paid ${paid:.0f} — ${drop:.0f} cheaper; consider rebooking",
                                 {"booking_id": b["booking_id"], "paid": paid, "now": now_total}))
@@ -94,7 +104,15 @@ def evaluate_bookings(conn: sqlite3.Connection | None = None) -> list[Event]:
             "lowest_seen": min(now_total, state.get("lowest_seen", now_total)),
             "checked_at": datetime.now().isoformat(timespec="seconds"),
         })
-        database.update_booking_state(b["booking_id"], state, conn)
+        writes.append(StateWrite("booking", b["booking_id"], state, alerting))
+    return events, writes
+
+
+def evaluate_bookings(conn: sqlite3.Connection | None = None) -> list[Event]:
+    from alerts import apply_writes  # local import, as in booking_payload
+
+    events, writes = pending_bookings(conn)
+    apply_writes(writes, True, conn)
     return events
 
 

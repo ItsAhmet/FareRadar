@@ -109,3 +109,19 @@ def test_booking_comparison_basis_is_fares_only_even_with_carry_on_counted(conn,
     (it,) = build_itineraries([out], [back], q)
     assert it.total_price > it.fare_total
     assert bookings.current_total(bookings.booking_payload(it), conn) == it.fare_total
+
+
+def test_booked_drop_push_that_fails_is_retried(conn, monkeypatch):
+    import alerts
+
+    monkeypatch.setattr(config, "OFFLINE", False)
+    monkeypatch.setattr(config, "NTFY_TOPIC", "test-topic")
+    monkeypatch.setattr(config, "SMTP_HOST", "")
+    results = iter([False, True])
+    monkeypatch.setattr(alerts, "notify_ntfy", lambda *a, **k: next(results))
+    it = package(conn)
+    db.add_booking("trip", bookings.booking_payload(it), 300.0, conn=conn)      # paid well above today's fares
+    alerts.evaluate_and_deliver(None, [], conn)
+    assert "alerted_total" not in db.list_bookings(conn)[0]["state"]
+    alerts.evaluate_and_deliver(None, [], conn)
+    assert db.list_bookings(conn)[0]["state"]["alerted_total"] == it.total_price
