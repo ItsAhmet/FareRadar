@@ -19,7 +19,7 @@
 
 - Project root: `~/avelo-finder` (NOT under iCloud). Run tests with: `cd ~/avelo-finder && AVELO_OFFLINE=1 .venv/bin/python -m pytest -q`. Baseline before Task 1: **90 passed**.
 - Tests make no network calls; database tests use `db.get_connection(":memory:")`; every `database.py` function takes an optional `conn`.
-- Schema changes: new tables go in `SCHEMA`; new columns go in `MIGRATIONS` (existing data must survive — the real `data/flights.db` has 881 fares, watches, rules, bookings and 11 runs).
+- Schema changes: new tables go in `SCHEMA`; new columns go in `MIGRATIONS` (existing data must survive — the real `data/flights.db` held 817 fares and 15 scrape runs on Oct 6 2026, but **no watches, rules or bookings**: legacy watch/rule/booking payloads exist only as the synthetic fixtures in Task 6 and the rows Task 12 seeds into a copy).
 - Never modify `data/flights.db` directly during development; Task 12 checks the migration on a **copy**.
 - Never print or log the value of `AVELO_NTFY_TOPIC`.
 - Streamlit ≥1.63: `width="stretch"`, unique `key` per `st.plotly_chart`, callback-driven widgets use `session_state` keys.
@@ -32,8 +32,8 @@
 
 ## Review Focus
 
-1. **Watches, rules and bookings saved before this upgrade** (payloads with only `out_id`/`out_dep`, rule state with old-format `matched` keys) must keep resolving and must not push a burst of "new match" alerts on the first run after upgrade. → tests in Task 6.
-2. **The real database's existing `scrape_runs`** has no `status` column and one run (#3) that never finished; migration must add the column, a finished legacy run must still be a valid baseline, the unfinished one must not. → tests in Task 9.
+1. **Watches, rules and bookings saved before this upgrade** (payloads with only `out_id`/`out_dep`, rule state with old-format `matched` keys) must keep resolving and must not push a burst of "new match" alerts on the first run after upgrade. The real database has none of these rows (0 watches, 0 bookings, checked Oct 6 2026), so the evidence is the synthetic tests in Task 6 plus the legacy rows Task 12 Step 1 seeds into a copy. → tests in Task 6, check in Task 12.
+2. **The real database's existing `scrape_runs`** has no `status` column and two runs that never finished (#3 from Sep 8 and #12 from Oct 5; 15 runs in all on Oct 6 2026); migration must add the column, a finished legacy run must still be a valid baseline, the unfinished one must not. → tests in Task 9.
 3. **`AVELO_HOME_AIRPORTS` with lowercase, spaces, duplicates or unknown codes** (`" phl, xyz,PHL "`) should give `["PHL"]`, and garbage should fall back to `["ILG"]`. → test in Task 1.
 4. **A calendar month that is not offered or fails to render** must leave that month's stored fares untouched and must not produce `sold_out` events. → test in Task 7.
 5. **A stale `scrape.lock` from a crashed run** (dead pid or garbage contents) must not block the next scrape forever. → tests in Task 10.
@@ -2127,22 +2127,70 @@ git commit -m "feat: dashboard searches every home airport and shows home-side c
 
 - [ ] **Step 1: Migration dry run on a copy of the real database**
 
+The real `data/flights.db` (Oct 6 2026: 817 fares, 15 scrape runs, runs #3 and #12 never finished) has **no watches, rules or bookings**, so migrating the copy alone proves nothing about legacy payloads. Part A migrates the copy and checks the run table. Part B seeds hand-built pre-upgrade watch, rule and booking rows into the **copy** (never the real file) and checks that the first evaluation stays silent. Both parts use the same copy; delete it at the end.
+
 ```bash
 cd ~/avelo-finder
 cp data/flights.db /tmp/flights-copy.db
+
+# Part A: migration
 AVELO_DB_PATH=/tmp/flights-copy.db AVELO_OFFLINE=1 .venv/bin/python - <<'EOF'
-import database, alerts, bookings
+import database
 conn = database.get_connection()
-print("status column:", "status" in {r["name"] for r in conn.execute("PRAGMA table_info(scrape_runs)")})
+cols = {r["name"] for r in conn.execute("PRAGMA table_info(scrape_runs)")}
+print("status column:", "status" in cols)
 print("fares:", conn.execute("SELECT COUNT(*) FROM avelo_flights").fetchone()[0])
+print("runs:", conn.execute("SELECT COUNT(*) FROM scrape_runs").fetchone()[0])
+print("unfinished runs:", [r[0] for r in conn.execute("SELECT run_id FROM scrape_runs WHERE finished_at IS NULL")])
+print("legacy runs with NULL status:", conn.execute("SELECT COUNT(*) FROM scrape_runs WHERE status IS NULL").fetchone()[0] if "status" in cols else "n/a (no status column yet)")
 print("watches:", len(database.list_watches(conn=conn)), "bookings:", len(database.list_bookings(conn)))
-ev = alerts.evaluate_packages(conn) + alerts.evaluate_rules(conn) + bookings.evaluate_bookings(conn)
-print("events on first evaluation:", [(e.kind, e.message[:60]) for e in ev])
 EOF
+
+# Part B: seed legacy rows into the copy, then evaluate once
+AVELO_DB_PATH=/tmp/flights-copy.db AVELO_OFFLINE=1 .venv/bin/python - <<'EOF'
+from datetime import date
+import alerts, bookings, database
+
+conn = database.get_connection()
+row = conn.execute(
+    "SELECT o.flight_id AS oid, o.departure_datetime AS odep, o.destination AS dst, o.price AS oprice, "
+    "       o.base_price AS obase, i.flight_id AS iid, i.departure_datetime AS idep, i.price AS iprice, "
+    "       i.base_price AS ibase "
+    "FROM avelo_flights o JOIN avelo_flights i "
+    "  ON i.origin = o.destination AND i.destination = o.origin AND i.departure_datetime > o.departure_datetime "
+    "WHERE o.origin = 'ILG' AND o.departure_datetime >= ? "
+    "ORDER BY o.departure_datetime, i.departure_datetime LIMIT 1", (date.today().isoformat(),)).fetchone()
+if row is None:
+    raise SystemExit("no future ILG round trip in the copy; scrape one first, or rely on the Task 6 tests and say so")
+total = round(row["oprice"] + row["iprice"], 2)
+# Exactly the fields the pre-upgrade code saved (no out_trip / in_trip / origins).
+package = {"out_id": row["oid"], "out_dep": row["odep"], "in_id": row["iid"], "in_dep": row["idep"],
+           "window_start": row["odep"][:10] + "T00:00", "window_end": row["idep"][:10] + "T23:59",
+           "destination": row["dst"], "route_mix": f"{row['dst']} in & out"}
+w = database.add_watch("package", "legacy package", package, conn)
+database.update_watch_state(w, {"last_total": total}, conn)
+database.add_booking("legacy booking", {**package, "out_price": row["oprice"], "out_base": row["obase"],
+                     "in_price": row["iprice"], "in_base": row["ibase"], "member_fare": 0,
+                     "destination_city": row["dst"], "out_date": row["odep"][:10], "in_date": row["idep"][:10]},
+                     total, conn=conn)
+rule = {"holiday_extend": False, "destinations": [row["dst"]], "start_weekday": 4, "start_time": "17:00",
+        "end_weekday": 6, "end_time": "23:59", "min_nights": 1, "max_budget": 1000, "allow_mix": True,
+        "max_pair_miles": 100.0, "span_days": 60}
+r = database.add_watch("rule", "legacy rule", rule, conn)
+old_key = "|".join(package[k] for k in ("out_id", "out_dep", "in_id", "in_dep", "window_start"))
+database.update_watch_state(r, {"matched": [old_key], "match_count": 1}, conn)   # old-format state, no key_version
+events = alerts.evaluate_packages(conn) + alerts.evaluate_rules(conn) + bookings.evaluate_bookings(conn)
+print("seeded:", row["oid"], row["odep"], "->", row["iid"], row["idep"], "total", total)
+print("events on first evaluation:", [(e.kind, e.message[:60]) for e in events])
+print("rule key_version:", database.list_watches("rule", conn)[0]["state"].get("key_version"))
+EOF
+
 rm /tmp/flights-copy.db
 ```
 
-Expected: `status column: True`; `fares: 881` (or the current count); watches/bookings counts unchanged; **no `rule_match` events** (legacy rule state is adopted silently) and no `watch_unavailable` events for trips whose fares still exist. Investigate anything else before continuing.
+Expected, Part A: `status column: True`; `fares:` the current count (817 on Oct 6 2026); `runs: 15` (or more); `unfinished runs: [3, 12]` (they must never become baselines); `legacy runs with NULL status:` equal to `runs` (migration does not backfill); `watches: 0 bookings: 0` (the real file has none, so this is expected, not a failure).
+
+Expected, Part B: `events on first evaluation: []` and `rule key_version: 2`. The legacy rule state is adopted silently, the legacy package watch and booking still resolve against the calendar rows, and no `watch_unavailable`, `price_drop` or `booked_drop` event appears. For reference, the pre-upgrade code (before Task 6) emits a burst for the same seed (three `rule_match` events plus "N more new matches" on the Oct 6 2026 data); that burst is what Task 6 must prevent. Investigate anything else before continuing.
 
 - [ ] **Step 2: Manual live check (owner present)**
 
