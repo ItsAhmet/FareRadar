@@ -134,7 +134,9 @@ def watch_package(it: Itinerary, conn: sqlite3.Connection | None = None) -> tupl
                 and trips.matches(out_k, key["out_trip"]) and trips.matches(in_k, key["in_trip"])):
             return w["watch_id"], False
     watch_id = database.add_watch("package", package_label(it), key, conn)
-    database.update_watch_state(watch_id, {"last_total": it.total_price}, conn)
+    # Fares only: evaluate_packages compares against out.price + back.price, so seeding with
+    # total_price would read the carry-on fees as a price drop when carry-on counting is on.
+    database.update_watch_state(watch_id, {"last_total": it.fare_total}, conn)
     return watch_id, True
 
 

@@ -278,3 +278,18 @@ def test_frontier_fare_drop_is_not_pushed_as_an_avelo_sale(monkeypatch):
     alerts.evaluate_and_deliver(run2, events, conn)
     assert events == [] and not sent
     conn.close()
+
+
+def test_watch_from_carry_on_counted_search_does_not_fake_a_price_drop(conn, monkeypatch):
+    monkeypatch.setattr(config, "CARRY_ON_FEE", {"XP": 0.0, "F9": 55.0})
+    out = Flight(airline="F9", origin="PHL", destination="TPA", departure_datetime=datetime(2026, 10, 8, 8), price=100,
+                 base_price=100, duration_minutes=150, flight_id="F9-PHL-TPA")
+    back = Flight(airline="F9", origin="TPA", destination="PHL", departure_datetime=datetime(2026, 10, 11, 15), price=80,
+                  base_price=80, duration_minutes=150, flight_id="F9-TPA-PHL")
+    db.upsert_flights([out, back], conn)
+    q = GetawayQuery({"TPA"}, [WINDOW], origins={"PHL"}, count_carry_on=True)
+    (it,) = build_itineraries([out], [back], q)
+    assert it.total_price == 290.0 and it.fare_total == 180
+    wid, _ = alerts.watch_package(it, conn)
+    assert db.list_watches("package", conn)[0]["state"]["last_total"] == 180
+    assert alerts.evaluate_packages(conn) == []  # fares unchanged -> no event

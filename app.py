@@ -586,7 +586,7 @@ def member_badge() -> None:
     st.markdown(
         f'<div style="display:inline-block;padding:6px 12px;border-radius:999px;'
         f'background:rgba(0,158,115,0.12);border:1px solid rgba(0,158,115,0.5);font-size:0.9rem;margin-bottom:8px">'
-        f'✅ <strong>{config.MEMBER_BADGE}</strong> · add-on fees locked at ${BENEFITS.total:.2f}</div>'
+        f'✅ <strong>{config.MEMBER_BADGE}</strong> · add-on fees locked at ${BENEFITS.total:.2f} on Avelo legs; Frontier carry-on not included</div>'
         f' <div style="display:inline-block;padding:6px 12px;border-radius:999px;'
         f'background:rgba({tone},0.12);border:1px solid rgba({tone},0.5);font-size:0.9rem;margin-bottom:8px">'
         f'{"🏆" if roi["paid_off"] else "📈"} {roi_text}</div>',
@@ -649,7 +649,8 @@ def package_inspector(ranked: list[Itinerary], version: float) -> None:
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         st.info("A browser window is opening with both legs searched. Pick your fares there; nothing is booked automatically.")
     with b3.popover("✅ Mark as booked"):
-        paid = st.number_input("Total you paid ($)", min_value=0.0, value=float(it.total_price), step=1.0, key="paid_input")
+        paid = st.number_input("Total you paid ($)", min_value=0.0, value=float(it.fare_total), step=1.0, key="paid_input",
+                               help="Fares only: booked trips are compared with today's fares, so add-on fees are left out.")
         notes = st.text_input("Notes", placeholder="confirmation code…", key="booking_notes")
         if st.button("Save booking", key="save_booking"):
             database.add_booking(alerts.package_label(it), bookings.booking_payload(it), paid, notes or None)

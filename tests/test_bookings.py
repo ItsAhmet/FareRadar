@@ -95,3 +95,17 @@ def test_booking_ignores_cheaper_flights_outside_its_window(conn):
     b = db.list_bookings(conn)[0]
     assert b["state"]["current_total"] == 180.0
     assert b["payload"]["out_trip"] == "XP|ILG|TPA|2026-10-07|19:00"
+
+
+def test_booking_comparison_basis_is_fares_only_even_with_carry_on_counted(conn, monkeypatch):
+    """The dashboard defaults 'paid' to fare_total; current_total must be on the same basis."""
+    monkeypatch.setattr(config, "CARRY_ON_FEE", {"XP": 0.0, "F9": 55.0})
+    out = Flight(airline="F9", origin="PHL", destination="TPA", departure_datetime=datetime(2026, 10, 8, 8), price=100,
+                 base_price=100, duration_minutes=150, flight_id="F9-PHL-TPA")
+    back = Flight(airline="F9", origin="TPA", destination="PHL", departure_datetime=datetime(2026, 10, 11, 15), price=80,
+                  base_price=80, duration_minutes=150, flight_id="F9-TPA-PHL")
+    db.upsert_flights([out, back], conn)
+    q = GetawayQuery({"TPA"}, [Window(datetime(2026, 10, 7, 18), datetime(2026, 10, 11, 23, 59))], origins={"PHL"}, count_carry_on=True)
+    (it,) = build_itineraries([out], [back], q)
+    assert it.total_price > it.fare_total
+    assert bookings.current_total(bookings.booking_payload(it), conn) == it.fare_total

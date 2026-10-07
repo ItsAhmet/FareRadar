@@ -231,7 +231,7 @@ MEMBER_BENEFITS: dict[str, float] = {
     "carry_on_bag": 0.0,
     "seat_selection": 0.0,
 }
-MEMBER_BADGE = "Avelo Plus Pricing Active (Free Carry-On & Seat Selection Applied)"
+MEMBER_BADGE = "Avelo Plus Pricing Active (Free Carry-On & Seat Selection on Avelo legs)"
 
 # For the ROI meter: what the membership costs per year, and what the free
 # carry-on + seat selection would have cost a non-member per flight leg.
