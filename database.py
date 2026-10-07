@@ -552,10 +552,13 @@ def selection_stats(
     start_date: date,
     end_date: date,
     conn: sqlite3.Connection | None = None,
+    airlines: Iterable[str] | None = None,
 ) -> dict:
-    """Coverage of the user's current selection (both directions)."""
+    """Coverage of the user's current selection (both directions).
+    `airlines` restricts to those carriers (None = all)."""
     origins, destinations = _codes(origins), [d.upper() for d in destinations]
-    if not destinations or not origins:
+    codes = None if airlines is None else [a.upper() for a in airlines]
+    if not destinations or not origins or codes == []:
         return {"flights": 0, "member_fares": 0, "last_scraped": None, "routes": 0}
     po, pd_ = _placeholders(origins), _placeholders(destinations)
     sql = f"""
@@ -569,28 +572,41 @@ def selection_stats(
     """
     params = [*origins, *destinations, *origins, *destinations,
               start_date.isoformat(), (end_date + timedelta(days=1)).isoformat()]
+    if codes is not None:
+        sql += f" AND airline IN ({_placeholders(codes)})"
+        params.extend(codes)
     row = dict(_fetch(sql, params, conn)[0])
     row["member_fares"] = row["member_fares"] or 0
     return row
 
 
 def route_freshness(
-    origins: str | Iterable[str], destinations: Iterable[str], conn: sqlite3.Connection | None = None
+    origins: str | Iterable[str], destinations: Iterable[str], conn: sqlite3.Connection | None = None,
+    airlines: Iterable[str] | None = None,
 ) -> list[dict]:
-    """Per directional route: when it was last scraped and how many fares it holds."""
+    """Per airline and directional route: when it was last scraped and how many
+    fares it holds. `airlines` restricts to those carriers (None = all)."""
     origins, destinations = _codes(origins), [d.upper() for d in destinations]
     if not destinations or not origins:
         return []
     po, pd_ = _placeholders(origins), _placeholders(destinations)
+    params: list = [*origins, *destinations, *origins, *destinations]
+    airline_sql = ""
+    if airlines is not None:
+        codes = [a.upper() for a in airlines]
+        if not codes:
+            return []
+        airline_sql = f" AND airline IN ({_placeholders(codes)})"
+        params.extend(codes)
     sql = f"""
-        SELECT origin, destination, MAX(timestamp_scraped) AS last_scraped, COUNT(*) AS fares,
+        SELECT airline, origin, destination, MAX(timestamp_scraped) AS last_scraped, COUNT(*) AS fares,
                MIN(substr(departure_datetime,1,10)) AS first_day, MAX(substr(departure_datetime,1,10)) AS last_day
         FROM avelo_flights
-        WHERE (origin IN ({po}) AND destination IN ({pd_})) OR (destination IN ({po}) AND origin IN ({pd_}))
-        GROUP BY origin, destination
-        ORDER BY origin NOT IN ({po}), destination, origin
+        WHERE ((origin IN ({po}) AND destination IN ({pd_})) OR (destination IN ({po}) AND origin IN ({pd_}))){airline_sql}
+        GROUP BY airline, origin, destination
+        ORDER BY origin NOT IN ({po}), destination, origin, airline
     """
-    return [dict(r) for r in _fetch(sql, [*origins, *destinations, *origins, *destinations, *origins], conn)]
+    return [dict(r) for r in _fetch(sql, [*params, *origins], conn)]
 
 
 def route_medians(

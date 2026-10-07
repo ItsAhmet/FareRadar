@@ -76,7 +76,7 @@ def load_selection_stats(destinations: tuple[str, ...], start: date, end: date, 
 
 @st.cache_data(show_spinner=False)
 def load_calendar(start: date, end: date, _version: float) -> pd.DataFrame:
-    return pd.DataFrame(database.route_calendar(start, end, airlines=["XP"]))  # Avelo only until Phase 3
+    return pd.DataFrame(database.route_calendar(start, end))
 
 
 @st.cache_data(show_spinner=False)
@@ -611,7 +611,7 @@ def freshness_panel(destinations: list[str], version: float) -> None:
         )
         now = pd.Timestamp.now()
         df["age"] = (now - df.last_scraped).apply(_humanize)
-        show = df[["route", "last_scraped", "age", "fares", "first_day", "last_day"]].rename(
+        show = df[["airline", "route", "last_scraped", "age", "fares", "first_day", "last_day"]].rename(
             columns={"route": "Route", "last_scraped": "Last scraped", "age": "Age", "fares": "Fares",
                      "first_day": "First day", "last_day": "Last day"}
         )

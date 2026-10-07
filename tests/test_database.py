@@ -641,3 +641,12 @@ def test_events_store_their_airline(conn):
                          Event("rule_match", None, None, None, "watch-level")], conn)
     rows = {r["kind"]: r["airline"] for r in db.list_events(conn=conn)}
     assert rows == {"sale_wave": "F9", "rule_match": None}
+
+
+def test_dashboard_readers_know_the_airline(conn):
+    db.upsert_flights([flight(origin="PHL", dest="MCO", day=10, price=100, number="XP1"), f9(price=60.0)], conn)
+    fresh = db.route_freshness(["PHL"], ["MCO"], conn=conn)
+    assert {(r["airline"], r["origin"], r["destination"], r["fares"]) for r in fresh} == {("XP", "PHL", "MCO", 1), ("F9", "PHL", "MCO", 1)}
+    assert [r["airline"] for r in db.route_freshness(["PHL"], ["MCO"], conn=conn, airlines=["f9"])] == ["F9"]
+    assert db.selection_stats(["PHL"], ["MCO"], date(2026, 10, 1), date(2026, 10, 31), conn=conn)["flights"] == 2
+    assert db.selection_stats(["PHL"], ["MCO"], date(2026, 10, 1), date(2026, 10, 31), conn=conn, airlines=["XP"])["flights"] == 1

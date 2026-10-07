@@ -3,6 +3,7 @@ from datetime import date
 from pathlib import Path
 
 import pytest
+import streamlit as st
 from streamlit.testing.v1 import AppTest
 
 import config
@@ -24,6 +25,7 @@ def mock_db(tmp_path, monkeypatch):
     monkeypatch.setattr(runlock, "LOCK_PATH", tmp_path / "scrape.lock")
     database.init_db(path)
     database.upsert_flights(generate_mock_flights(date.today(), 70))
+    st.cache_data.clear()  # the page's cached readers ignore the DB path; each test has its own database
     return path
 
 
@@ -356,3 +358,23 @@ def test_saved_rule_without_a_partner_has_none(mock_db):
     at = AppTest.from_file(str(APP), default_timeout=90).run()
     payload = _save_rule(at, "Just me")
     assert payload["partner"] is None and payload["airlines"] == sorted(config.KNOWN_AIRLINES)
+
+
+def test_dashboard_shows_frontier_packages_with_their_airline(mock_db, monkeypatch):
+    monkeypatch.setattr(config, "HOME_CODES", ["ILG", "PHL"])
+    with database.connection() as conn:
+        conn.execute("""
+            INSERT INTO avelo_flights (flight_id, origin, destination, departure_datetime, arrival_datetime, price, currency,
+                duration_minutes, flight_number, base_price, member_price, is_member_fare, promo_code, airline, timestamp_scraped)
+            SELECT 'F9-' || flight_id, CASE origin WHEN 'ILG' THEN 'PHL' ELSE origin END,
+                   CASE destination WHEN 'ILG' THEN 'PHL' ELSE destination END, departure_datetime, arrival_datetime,
+                   price - 40, currency, duration_minutes, flight_number, price - 40, price - 41, 0, promo_code, 'F9', timestamp_scraped
+            FROM avelo_flights WHERE (origin = 'ILG' OR destination = 'ILG') AND arrival_datetime IS NOT NULL
+        """)
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    assert not at.exception, at.exception
+    tables = [df.value for df in at.dataframe if "Airlines" in df.value.columns]
+    assert tables and (tables[0]["Airlines"] == "Frontier").any()
+    frontier_rows = tables[0][tables[0]["Airlines"] == "Frontier"]
+    assert (frontier_rows["Program would save"] > 0).all()
+    assert any("airline" in df.value.columns and (df.value["airline"] == "F9").any() for df in at.dataframe)   # freshness table
