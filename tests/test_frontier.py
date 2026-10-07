@@ -395,7 +395,10 @@ def test_full_run_after_a_detail_run_raises_no_signal_when_fares_did_not_change(
     two = scraper_with(monkeypatch, "full", calendar=cheaper_connections, days=nonstops)
     run_routes(two)
     assert db.seen_in_run(two.run_id, "PHL", "MCO") == db.seen_in_run(one.run_id, "PHL", "MCO") == {d: 90.0 for d in WANTED}
-    assert signals.run_detection(two.run_id) == []
+    # the change detector sees no difference between the two runs (run_detection itself skips F9 until Phase 3)
+    events, _ = signals.detect_route("PHL", "MCO", db.seen_in_run(one.run_id, "PHL", "MCO"),
+                                     db.seen_in_run(two.run_id, "PHL", "MCO"), 90.0)
+    assert [e for e in events if e.notify] == []
 
 
 class FakeCalendarPage:

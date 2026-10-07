@@ -250,3 +250,29 @@ def test_latest_run_signals_cover_every_airlines_newest_run(mock_db):
     assert not at.exception, at.exception
     table = next(d.value for d in at.dataframe if list(d.value.columns) == ["Kind", "Route", "Day", "Detail"])
     assert sorted(table["Detail"]) == ["Avelo sale", "Frontier low"]
+
+
+def test_frontier_only_database_shows_no_signals_but_does_appear_in_freshness(mock_db):
+    # documented in README/CLAUDE.md: packages, signals and pushes are Avelo-only; the freshness table and the
+    # selection counts are not airline-aware yet (Phase 3)
+    from datetime import datetime, timedelta
+    from models import Flight
+    import signals
+    days = [date.today() + timedelta(days=20 + i) for i in range(6)]
+    for price in (100.0, 60.0):
+        run = database.start_run("full", [("PHL", "MCO")], None, airline="F9")
+        fares = [Flight(flight_id="F9-2415-PHL-MCO", origin="PHL", destination="MCO",
+                        departure_datetime=datetime.combine(d, datetime.min.time()).replace(hour=7),
+                        price=price, base_price=price, member_price=price - 10, airline="F9") for d in days]
+        database.upsert_flights(fares)
+        database.record_seen(run, "PHL", "MCO", days, fares)
+        database.finish_run(run, {}, status="ok")
+        assert signals.run_detection(run) == []
+    assert database.list_events(limit=50) == []
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    assert not at.exception, at.exception
+    texts = [m.value for m in at.markdown] + [c.value for c in at.caption]
+    assert not any("PHL→MCO" in t and "lowest fare" in t for t in texts)
+    assert not any("floor" in df.value.to_string() and "PHL" in df.value.to_string() for df in at.dataframe)
+    # the known gap, pinned at the query the freshness table uses (the page itself caches it across AppTests)
+    assert any((r["origin"], r["destination"]) == ("PHL", "MCO") for r in database.route_freshness(["PHL"], ["MCO"]))

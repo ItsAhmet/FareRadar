@@ -25,6 +25,11 @@ from config import airport_name
 
 log = logging.getLogger(__name__)
 
+# Airlines whose runs produce signals. route_floor and the events feed carry no airline column yet, so a
+# Frontier run would overwrite Avelo's floor on a shared route and push "Avelo sale" alerts for Frontier fares.
+# Phase 3 makes both airline-aware and widens this set.
+SIGNAL_AIRLINES = frozenset({"XP"})
+
 
 @dataclass
 class Event:
@@ -106,7 +111,12 @@ def detect_route(
 
 
 def run_detection(run_id: int, conn: sqlite3.Connection | None = None, allow_sold_out: bool = True) -> list[Event]:
-    """Detect signals for every route this run saw and store them."""
+    """Detect signals for every route this run saw and store them. Runs of airlines outside SIGNAL_AIRLINES
+    (Frontier until Phase 3) detect nothing: no events, no floor write."""
+    airline = database.run_airline(run_id, conn)
+    if airline not in SIGNAL_AIRLINES:
+        log.info("signals: skipped for run %s (%s fares are stored but raise no signals yet)", run_id, airline)
+        return []
     all_events: list[Event] = []
     for origin, dest in database.routes_in_run(run_id, conn):
         cur = database.seen_in_run(run_id, origin, dest, conn)

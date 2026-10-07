@@ -18,12 +18,12 @@ Desktop: iCloud "Optimize Mac Storage" evicted ~20k `.venv` files (`ls -lO` show
 ```bash
 cd ~/avelo-finder
 source .venv/bin/activate            # venv already built; playwright chromium installed
-pytest -q                            # 281 tests, no network; AppTest boots the dashboard
+pytest -q                            # 285 tests, no network; AppTest boots the dashboard
 streamlit run app.py                 # dashboard (nothing scrapes on load)
 python launch.py [--detach|--stop]   # start if needed + open browser; ~/Desktop/Avelo Finder.command calls it
 python run_scraper.py --destinations TPA,LAL --start 2026-10-01 --end 2026-10-14   # targeted live scrape
 python run_scraper.py --mock         # synthetic data; --mock-sale 0.25 simulates a sale
-python run_scraper.py --airlines F9 --origins PHL --destinations MCO --days 21 --mode full   # Frontier (stored, not yet shown)
+python run_scraper.py --airlines F9 --origins PHL --destinations MCO --days 21 --mode full   # Frontier (stored; not in packages or signals yet)
 python run_scraper.py --airlines XP,F9 --routes ILG-TPA,PHL-MCO   # each airline gets only the routes it could fly
 python handoff.py --legs ILG-TPA:2026-10-09,TPA-ILG:2026-10-12   # visible browser, stops at results
 ```
@@ -55,7 +55,7 @@ scratch `AVELO_DB_PATH` for a test run should too (e.g. `/tmp/x/flights.db`).
 | `database.py` | SQLite schema + in-place migrations; flights (+ `airline`, `member_price`), price_history (+ `airline`), `route_catalog` (who flies what, with a nonstop flag), memberships (`settings`, default XP yes / F9 no; `price` follows `airlines.owner_price`),  scrape_runs (+ `airline`, one run per airline; + `status` ok/partial/failed; only finished `ok` runs, or legacy NULL-status ones, are signal baselines), route_day_seen, route_floor, events, watchlist, bookings, places, drive_times, settings (JSON key/value; `home_costs` = per-home-airport drive minutes + parking/day, via `set_home_cost`) |
 | `scraper.py` | Playwright driver for Avelo's form + **pure parsers** (`parse_schedule`, `parse_lowfare_calendar`, `parse_select_page`, `plan_targets`) |
 | `optimizer.py` | `Availability`/`Window`, `GetawayQuery`, `build_itineraries`, rankings (price/fit/sun/door-to-door), `enrich*`, `wildcard` |
-| `signals.py` | sale wave / sold out / floor detection between consecutive runs |
+| `signals.py` | sale wave / sold out / floor detection between consecutive runs; `XP` runs only until Phase 3 (`SIGNAL_AIRLINES`) |
 | `alerts.py` | watchlist rules + packages, push selection, ntfy + SMTP delivery; evaluated once after all airlines' runs |
 | `bookings.py` | booked-trip tracker + Plus ROI meter |
 | `planner.py` | season planner (one trip per window under a budget) |
@@ -134,7 +134,9 @@ scratch `AVELO_DB_PATH` for a test run should too (e.g. `/tmp/x/flights.db`).
 - Most flights are connections, and a route with only connections must never yield stored fares
   (the nonstop gate probes a few days and records the answer in `route_catalog.nonstop`).
 - Fare semantics: `price` = what the owner would pay (program fare if a member of that airline's program, else
-  public), `base_price` = public fare, `member_price` = program fare. Frontier fares are stored, not yet shown.
+  public), `base_price` = public fare, `member_price` = program fare. Frontier fares are stored, not in packages/watches/calendar/signals (see the Phase 3 convention below); they do still
+  appear in the dashboard's freshness table and selection counts (`route_freshness`, `selection_stats` are not
+  airline-aware yet; deferred to Phase 3).
 - **Known limitations.** The public route page is paginated: only about 20 of ~30 destinations per home airport
   reach `route_catalog`, so unlisted routes need `--routes` (e.g. `--airlines F9 --routes PHL-MCO`).
   `frontier.is_challenge_page` markers are **unverified**: no real challenge page has been captured, so a
@@ -167,7 +169,11 @@ scratch `AVELO_DB_PATH` for a test run should too (e.g. `/tmp/x/flights.db`).
   airlines' runs; the dashboard's "latest run" is each airline's newest run (`database.latest_run_ids`).
 - An index on a migrated column is created in `_migrate`, not `SCHEMA` (`SCHEMA` runs first, so on an
   existing database the column does not exist yet).
-- Until Phase 3, packages/alerts read `XP` rows only (`optimizer.find_itineraries`).
+- Until Phase 3, packages, watch evaluation and the fare calendar read `XP` rows only (`optimizer.find_itineraries`,
+  `app.py` calendar). Signals are `XP`-only too: `signals.run_detection` returns nothing for other airlines' runs
+  (`signals.SIGNAL_AIRLINES`), because `route_floor` and `events` have no airline column and an F9 run would
+  overwrite Avelo's floor and push "Avelo sale" alerts for Frontier fares. Phase 3 adds the airline column
+  (backfilled `XP`) and widens the set. Frontier data still shows in the freshness table and selection counts.
 - A run's `status` (ok/partial/failed) decides whether it can be a signal baseline.
 - Total Getaway Cost = member fares only; `MemberBenefits` locks add-ons at $0.
 - Long scrapes run as a `Popen` from the dashboard with a log tail, cancel, and timeout.

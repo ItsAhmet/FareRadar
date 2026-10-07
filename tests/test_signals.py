@@ -94,3 +94,35 @@ def test_run_detection_passes_allow_sold_out_through():
     assert not [e for e in run_detection(r2, conn, allow_sold_out=False) if e.kind == "sold_out"]
     assert [e.day for e in run_detection(r2, conn) if e.kind == "sold_out"] == [d2]  # the default still reports it
     conn.close()
+
+
+def _fare_run(conn, airline, price, fid, origin="BWI", dest="TPA"):
+    days = [date(2026, 11, 10 + i) for i in range(4)]
+    run = db.start_run("calendar", [(origin, dest)], airline=airline, conn=conn)
+    fares = [Flight(flight_id=fid, origin=origin, destination=dest, departure_datetime=datetime(2026, 11, 10 + i),
+                    price=price, airline=airline) for i in range(4)]
+    db.record_seen(run, origin, dest, days, fares, conn)
+    db.finish_run(run, {}, status="ok", conn=conn)
+    return run
+
+
+def test_frontier_runs_raise_no_signals_and_leave_the_avelo_floor_alone():
+    # route_floor and the events feed have no airline column until Phase 3: a Frontier run on a route both
+    # airlines fly must not overwrite Avelo's floor or push an "Avelo sale" for a Frontier fare
+    conn = db.get_connection(":memory:")
+    run_detection(_fare_run(conn, "XP", 80, "LOWFARE-BWI-TPA"), conn)
+    assert db.get_floor("BWI", "TPA", conn) == 80
+    f9 = _fare_run(conn, "F9", 40, "F9CAL-BWI-TPA")
+    assert run_detection(f9, conn) == []
+    assert db.get_floor("BWI", "TPA", conn) == 80 and db.list_events(run_id=f9, conn=conn) == []
+    events = run_detection(_fare_run(conn, "XP", 70, "LOWFARE-BWI-TPA"), conn)
+    assert "new_floor" in kinds(events) and db.get_floor("BWI", "TPA", conn) == 70   # Avelo's own new low is reported
+    conn.close()
+
+
+def test_run_airline_and_unknown_runs():
+    conn = db.get_connection(":memory:")
+    run = db.start_run("calendar", [("BWI", "TPA")], airline="F9", conn=conn)
+    assert db.run_airline(run, conn) == "F9" and db.run_airline(999, conn) is None
+    assert run_detection(999, conn) == []
+    conn.close()

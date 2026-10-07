@@ -45,7 +45,7 @@ source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 playwright install chromium        # one-time browser download (~100 MB)
 cp .env.example .env               # optional: tweak headless mode, DB path, etc.
-pytest -q                          # 281 tests, no network needed
+pytest -q                          # 285 tests, no network needed
 ```
 
 The project lives in `~/avelo-finder`, outside iCloud-synced folders. To start
@@ -76,9 +76,11 @@ python run_scraper.py --airlines XP,F9 --routes ILG-TPA,PHL-MCO   # each airline
 AVELO_AIRLINES=XP,F9                                              # in .env: the default when --airlines is omitted
 ```
 
-Frontier fares are **stored but not yet shown**: packages, alerts and the dashboard still use Avelo only
-(Phase 3). Only nonstop Frontier flights are kept. Each airline gets its own scrape run, so signals compare
-like with like. Frontier's public route page lists only about 20 of ~30 destinations per home airport, so
+Frontier fares are **stored but not yet shown in the product**: packages, watch rules and the fare calendar read
+Avelo rows only until Phase 3, and signal detection (so alerts, pushes and the dashboard's signal feed) skips
+Frontier runs. Frontier data does still appear in two dashboard places that are not airline-aware yet: the
+freshness table and the "N fares on M routes" selection counts. Only nonstop Frontier flights are kept. Each
+airline gets its own scrape run, so baselines compare like with like. Frontier's public route page lists only about 20 of ~30 destinations per home airport, so
 for a route that is not listed pass it with `--routes`.
 
 Other useful invocations:

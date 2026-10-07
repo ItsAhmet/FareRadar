@@ -689,6 +689,12 @@ def latest_run_ids(conn: sqlite3.Connection | None = None) -> list[int]:
     return [int(r["run_id"]) for r in rows]
 
 
+def run_airline(run_id: int, conn: sqlite3.Connection | None = None) -> str | None:
+    """The airline code a run belongs to, or None when the run does not exist."""
+    rows = _fetch("SELECT airline FROM scrape_runs WHERE run_id = ?", (run_id,), conn)
+    return rows[0]["airline"] if rows else None
+
+
 def last_runs(limit: int = 10, conn: sqlite3.Connection | None = None) -> list[dict]:
     rows = _fetch("SELECT * FROM scrape_runs ORDER BY run_id DESC LIMIT ?", (limit,), conn)
     out = []

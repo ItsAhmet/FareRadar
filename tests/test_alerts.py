@@ -247,3 +247,34 @@ def test_day_only_watch_with_no_fitting_flight_is_unavailable_not_pinned(conn):
     db.upsert_flights([f("ILG", "TPA", 7, 20, 100, "AVELO-ILG-TPA-PM")], conn)
     assert alerts.evaluate_packages(conn) == []
     assert db.list_watches("package", conn)[0]["payload"]["out_trip"] == "XP|ILG|TPA|2026-10-07|20:00"
+
+
+def test_frontier_fare_drop_is_not_pushed_as_an_avelo_sale(monkeypatch):
+    # saved rule: any home airport -> MCO; a Frontier-only price drop on PHL-MCO used to be pushed
+    # under the title "Avelo sale on a watched route"
+    import signals
+    from datetime import timedelta
+    conn = db.get_connection(":memory:")
+    db.add_watch("rule", "Orlando weekends", {"origins": ["ILG", "PHL", "BWI"], "destinations": ["MCO"]}, conn=conn)
+    days = [date.today() + timedelta(days=20 + i) for i in range(6)]
+
+    def f9_run(price):
+        run = db.start_run("full", [("PHL", "MCO")], None, airline="F9", conn=conn)
+        fares = [Flight(flight_id="F9-2415-PHL-MCO", origin="PHL", destination="MCO",
+                        departure_datetime=datetime.combine(d, time(7)), price=price, base_price=price,
+                        member_price=price - 10, airline="F9") for d in days]
+        db.upsert_flights(fares, conn=conn)
+        db.record_seen(run, "PHL", "MCO", days, fares, conn=conn)
+        db.finish_run(run, {}, status="ok", conn=conn)
+        return run
+
+    f9_run(100.0)
+    run2 = f9_run(60.0)
+    events = signals.run_detection(run2, conn)
+    sent = []
+    monkeypatch.setattr(config, "NTFY_TOPIC", "probe-topic")
+    monkeypatch.setattr(alerts, "notify_ntfy", lambda title, body, *a, **k: sent.append((title, body)) or True)
+    monkeypatch.setattr(alerts, "evaluate_rules", lambda *a, **k: [])
+    alerts.evaluate_and_deliver(run2, events, conn)
+    assert events == [] and not sent
+    conn.close()
