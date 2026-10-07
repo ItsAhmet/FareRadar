@@ -647,13 +647,13 @@ def package_inspector(ranked: list[Itinerary], version: float) -> None:
             st.success(f"Watching {alerts.package_label(it)} at ${it.total_price:,.0f}")
         else:
             st.info("You're already watching this package.")
-    if b2.button("✈️ Open on Avelo", help="Opens a visible browser with each leg's search filled in and stops at the results. Never books."):
-        legs = [(it.outbound.origin, it.outbound.destination, it.outbound.departure_date),
-                (it.inbound.origin, it.inbound.destination, it.inbound.departure_date)]
+    if b2.button("✈️ Open on airline site", help="Avelo legs open in an assisted browser with the search filled in; Frontier legs open Frontier's results page. Never books."):
+        legs = [(it.outbound.origin, it.outbound.destination, it.outbound.departure_date, it.outbound.airline),
+                (it.inbound.origin, it.inbound.destination, it.inbound.departure_date, it.inbound.airline)]
         promo = st.session_state.get("promo_code_value") or None
         subprocess.Popen(handoff_command(legs, promo), cwd=config.PROJECT_ROOT, start_new_session=True,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        st.info("A browser window is opening with both legs searched. Pick your fares there; nothing is booked automatically.")
+        st.info("Opening each leg on its airline's site. Pick your fares there; nothing is booked automatically.")
     with b3.popover("✅ Mark as booked"):
         paid = st.number_input("Total you paid ($)", min_value=0.0, value=float(it.fare_total), step=1.0, key="paid_input",
                                help="Fares only: booked trips are compared with today's fares, so add-on fees are left out.")

@@ -42,7 +42,7 @@ def test_dashboard_renders_without_exceptions(mock_db):
     assert any("Promo Code" in t.label for t in at.text_input)
     assert any("Inspect a package" in sb.label for sb in at.selectbox)  # trend & weather inspector
     assert any("Watch this package" in b.label for b in at.button)
-    assert any("Open on Avelo" in b.label for b in at.button)
+    assert any("Open on airline site" in b.label for b in at.button)
     assert any("Plus ROI" in m.value for m in at.markdown)
     assert any("Save rule" in b.label for b in at.button)
     assert any("Install / update" in b.label for b in at.button)
