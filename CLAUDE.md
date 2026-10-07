@@ -83,6 +83,11 @@ geocoding, routing, pushes); tests set `config.OFFLINE` via monkeypatch.
   stage; that does not prove a discount.
 - Currently served from ILG (Sep 2026): TPA, RSW, SRQ (from Nov 19) and more;
   PGD/PIE are **not** flown. Unscheduled pairs are skipped, not errors.
+- A scheduled day that has **sold out** is still selectable in the date picker. The select
+  page then shows "There are no flights available for the selected date. Please select a
+  different date." and no cards (seen Sep 2 2026, SRQ→HVN Sep 7). `scrape_day` waits for a card
+  *or* that text and raises `DateUnavailable` for the latter; `_pick_date` raises it only when the
+  picker rendered other days. A picker with no selectable day at all is a `ScrapeError` (retry).
 - Stealth: one UA/viewport per run, cookies persisted to `data/browser_state.json`
   (**cookies only** — persisting localStorage stops the app re-fetching routes/all),
   webdriver masked, trackers/images blocked, human pauses.

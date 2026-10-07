@@ -64,6 +64,10 @@ Mode = Literal["calendar", "detail", "full"]
 LOWFARE_PREFIX = "LOWFARE"  # flight_id prefix for calendar rows (no time known)
 DETAIL_PREFIX = "AVELO"  # flight_id prefix for rows parsed from flight cards
 SEL = config.SELECTORS
+# What Avelo's Select Flights page says when a scheduled day has sold out (seen Sep 2 2026, SRQ→HVN Sep 7; no flight
+# cards at all). The date picker still accepts such a day, so this answer only arrives on the results page.
+NO_FLIGHTS_PATTERN = re.compile(r"no\s+flights\s+available", re.I)
+SOLD_OUT_SETTLE_MS = 1_500  # re-check once before believing the message: cards may still be on their way
 
 # Third-party trackers the booking app embeds. Blocking them makes pages load
 # faster and quieter; none of them affect fares.
@@ -78,7 +82,8 @@ class ScrapeError(RuntimeError):
 
 
 class DateUnavailable(ScrapeError):
-    """The requested day has no selectable cell (sold out or not flown)."""
+    """Avelo answered that the requested day has no flights: the picker offers no cell for it, or the results page
+    says "no flights available". An answer, not a failure: it is not retried and the day is recorded as no-fare."""
 
 
 @dataclass
@@ -245,6 +250,14 @@ def parse_select_page(
             )
         )
     return flights
+
+
+def select_page_is_sold_out(html: str) -> bool:
+    """True when the Select Flights page answers "There are no flights available for the selected date"."""
+    soup = BeautifulSoup(html, "html.parser")
+    for hidden in soup(["script", "style"]):  # only text the user can read counts
+        hidden.decompose()
+    return bool(NO_FLIGHTS_PATTERN.search(soup.get_text(" ", strip=True)))
 
 
 @dataclass(frozen=True)
@@ -576,7 +589,11 @@ class AveloScraper:
         try:
             await cell.wait_for(state="visible", timeout=8_000)
         except PlaywrightTimeout as exc:
-            raise DateUnavailable(f"no selectable calendar cell for {day} (sold out or not flown)") from exc
+            if not await page.locator(SEL["date_cell"]).filter(visible=True).count():
+                # Not one selectable day: the picker did not render. That is a failure to retry, not an
+                # answer, and must not clear this day's stored fares as if it had sold out.
+                raise ScrapeError(f"date picker showed no selectable days (wanted {day})") from exc
+            raise DateUnavailable(f"no selectable calendar cell for {day} (not flown)") from exc
         await cell.click()
 
     async def _apply_promo(self) -> None:
@@ -638,7 +655,7 @@ class AveloScraper:
     async def scrape_lowfare_route(self, origin: str, dest: str, days: list[date]) -> list[Flight]:
         """Low Fare Calendar for a route: every month that `days` touches."""
         page = self.page
-        # The form needs *a* flight day to submit; if the first is sold out try the next.
+        # The form needs *a* flight day to submit; if the picker offers no cell for the first, try the next.
         last_error: Exception | None = None
         for candidate in days[:3]:
             try:
@@ -676,8 +693,16 @@ class AveloScraper:
         page = self.page
         await self._submit_search(origin, dest, day, lowfare=False)
         await page.wait_for_url(re.compile(r"/flight-search/select"))
-        await page.wait_for_selector(SEL["flight_card"])
-        flights = parse_select_page(await page.content(), origin, dest, day)
+        # A sold-out day shows a message instead of cards: wait for either rather than timing out on the cards.
+        await page.locator(SEL["flight_card"]).or_(page.get_by_text(NO_FLIGHTS_PATTERN)).first.wait_for(state="visible")
+        html = await page.content()
+        flights = parse_select_page(html, origin, dest, day)
+        if not flights and select_page_is_sold_out(html):
+            await page.wait_for_timeout(SOLD_OUT_SETTLE_MS)
+            html = await page.content()
+            flights = parse_select_page(html, origin, dest, day)
+            if not flights and select_page_is_sold_out(html):
+                raise DateUnavailable(f"{origin}→{dest} {day}: Avelo reports no flights available for that date")
         if not flights:
             raise ScrapeError("results rendered but no flight cards parsed (selectors may have changed)")
         return flights
