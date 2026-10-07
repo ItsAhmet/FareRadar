@@ -205,11 +205,15 @@ AVELO_DB_PATH=/tmp/demo.db python run_scraper.py --mock --mock-sale 0.25 --desti
 
 ## Booking, tracking and planning
 
-* **✈️ Open on Avelo** (Trend & weather tab): launches a *visible* browser,
-  searches each leg of the package with your promo applied, and stops on the
-  results page. It never selects a fare or books; you finish by hand. Runs
-  detached, so closing the dashboard doesn't close the browser.
-  CLI: `python handoff.py --legs ILG-TPA:2026-10-09,LAL-ILG:2026-10-12`.
+* **✈️ Open on airline site** (Trend & weather tab): Avelo legs open in a
+  *visible* assisted browser that searches each leg with your promo applied
+  and stops on the results page. Frontier legs open Frontier's results page as
+  a link in your default browser (the promo applies to Avelo only). It never
+  selects a fare or books; you finish by hand. The assisted browser runs
+  detached, so closing the dashboard doesn't close it.
+  CLI: `python handoff.py --legs ILG-TPA:2026-10-09,LAL-ILG:2026-10-12`; each
+  leg is `ORG-DST:DATE[:AIRLINE]` and the airline defaults to `XP` (Avelo), so
+  a Frontier leg is `ILG-MCO:2026-10-09:F9`.
 * **✅ Mark as booked**: record what you paid. After every scrape the trip's
   current fare is compared with it ("you beat the market by $X", or a push
   alert when it is $10+ cheaper and rebooking might pay). Bookings live in
