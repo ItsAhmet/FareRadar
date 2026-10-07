@@ -49,3 +49,63 @@ def test_cli_text_describes_all_home_airports_not_a_fixed_origin():
     assert "AVELO_HOME_AIRPORTS" in build_parser().description
     assert "ILG" not in build_parser().description
     assert "all ILG routes" not in run_scraper.__doc__
+
+
+import database
+import runlock
+import run_scraper
+
+
+@pytest.fixture
+def isolated(tmp_path, monkeypatch):
+    monkeypatch.setattr(database, "DB_PATH", tmp_path / "f.db")
+    monkeypatch.setattr(runlock, "LOCK_PATH", tmp_path / "scrape.lock")
+    return tmp_path
+
+
+def test_build_command_passes_origins():
+    cmd = build_command(["TPA"], date(2026, 10, 1), date(2026, 10, 7), origins=["ilg", "phl"], python="py")
+    assert cmd[cmd.index("--origins") + 1] == "ILG,PHL"
+    assert "--origins" not in build_command(["TPA"], date(2026, 10, 1), date(2026, 10, 7), python="py")
+
+
+def test_parse_origins_validates():
+    assert run_scraper.parse_origins("ilg,PHL") == ["ILG", "PHL"]
+    assert run_scraper.parse_origins(None) == config.HOME_CODES
+    with pytest.raises(SystemExit):
+        run_scraper.parse_origins("ILG,TPA")
+
+
+def test_mock_run_finishes_ok_and_releases_lock(isolated):
+    assert run_scraper.main(["--mock", "--destinations", "TPA", "--days", "7", "--no-alerts", "--origins", "ILG"]) == 0
+    assert database.last_runs(1)[0]["status"] == "ok"
+    assert not (isolated / "scrape.lock").exists()
+
+
+def test_crash_is_recorded_as_failed_run(isolated, monkeypatch):
+    def boom(*_a, **_k):
+        raise RuntimeError("browser exploded")
+    monkeypatch.setattr(run_scraper, "generate_mock_flights", boom)
+    assert run_scraper.main(["--mock", "--destinations", "TPA", "--days", "7", "--no-alerts"]) == 1
+    run = database.last_runs(1)[0]
+    assert run["status"] == "failed" and run["finished_at"] and "browser exploded" in run["summary"]["error"]
+    assert not (isolated / "scrape.lock").exists()
+
+
+def test_refuses_to_start_while_another_scrape_runs(isolated):
+    assert runlock.acquire()
+    try:
+        assert run_scraper.main(["--mock", "--destinations", "TPA", "--days", "3", "--no-alerts"]) == 3
+    finally:
+        runlock.release()
+    assert database.last_runs(1) == []
+
+
+def test_mock_run_records_sightings_only_for_primary_home_routes(isolated):
+    # The mock schedule only flies routes touching PRIMARY_HOME; another home's
+    # routes must not get "seen, no fare" rows (they would read as sold out).
+    other = next(c for c in config.HOME_AIRPORT_INFO if c != config.PRIMARY_HOME)
+    origins = f"{config.PRIMARY_HOME},{other}"
+    assert run_scraper.main(["--mock", "--destinations", "TPA", "--days", "7", "--no-alerts", "--origins", origins]) == 0
+    run_id = database.last_runs(1)[0]["run_id"]
+    assert set(database.routes_in_run(run_id)) == {(config.PRIMARY_HOME, "TPA"), ("TPA", config.PRIMARY_HOME)}

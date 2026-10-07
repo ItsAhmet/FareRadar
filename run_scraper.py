@@ -9,6 +9,7 @@ Examples
 --------
     python run_scraper.py                                  # every home-airport route, next 60 days
     python run_scraper.py --destinations TPA,LAL --days 30 # two destinations, both directions
+    python run_scraper.py --destinations TPA --origins ILG,PHL # only these home airports
     python run_scraper.py --start 2026-10-01 --end 2026-11-15 --mode full
     python run_scraper.py --routes ILG-CHS --headful       # one direction, watch the browser
     python run_scraper.py --mock                           # synthetic data, no network
@@ -25,6 +26,7 @@ from datetime import date, datetime, timedelta
 import alerts
 import config
 import database
+import runlock
 import signals
 from mock_data import generate_mock_flights, scheduled_days
 
@@ -49,6 +51,16 @@ def parse_destinations(spec: str | None) -> list[str]:
     return codes
 
 
+def parse_origins(spec: str | None) -> list[str]:
+    if not spec:
+        return list(config.HOME_CODES)
+    codes = [c.strip().upper() for c in spec.split(",") if c.strip()]
+    unknown = [c for c in codes if c not in config.HOME_AIRPORT_INFO]
+    if unknown:
+        raise SystemExit(f"Unknown home airport(s): {', '.join(unknown)}")
+    return list(dict.fromkeys(codes))
+
+
 def build_dates(start: date, end: date | None, days: int | None) -> list[date]:
     """Inclusive date list from --start to --end, or --days long."""
     if end is not None:
@@ -68,6 +80,7 @@ def build_command(
     headful: bool = False,
     python: str | None = None,
     promo: str | None = None,
+    origins: list[str] | None = None,
 ) -> list[str]:
     """argv for a targeted run. Used by the dashboard; tested so the UI's
     filters provably reach the scraper unchanged."""
@@ -79,6 +92,8 @@ def build_command(
         "--end", end.isoformat(),
         "--mode", mode,
     ]
+    if origins:
+        cmd += ["--origins", ",".join(o.upper() for o in origins)]
     if purge:
         cmd.append("--purge")
     if mock:
@@ -97,6 +112,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--days", type=int, default=None, help=f"How many days to cover (default {config.DAYS_AHEAD})")
     p.add_argument("--destinations", help="Comma list of destination codes, e.g. TPA,LAL (both directions)")
     p.add_argument("--routes", help="Comma list like ILG-TPA,TPA-ILG (overrides --destinations)")
+    p.add_argument("--origins", help="Comma list of home airports, e.g. ILG,PHL (default: AVELO_HOME_AIRPORTS)")
     p.add_argument(
         "--mode",
         choices=["calendar", "detail", "full"],
@@ -123,6 +139,16 @@ def main(argv: list[str] | None = None) -> int:
         stream=sys.stdout,
     )
     log = logging.getLogger("run_scraper")
+    if not runlock.acquire():
+        log.error("another scrape is already running (pid %s); not starting", runlock.holder_pid())
+        return 3
+    try:
+        return _run(args, log)
+    finally:
+        runlock.release()
+
+
+def _run(args: argparse.Namespace, log: logging.Logger) -> int:
     database.init_db()
     housekeeping = database.maintenance()
     log.info("maintenance: %s", ", ".join(f"{k}={v}" for k, v in housekeeping.items()))
@@ -130,50 +156,57 @@ def main(argv: list[str] | None = None) -> int:
     if args.routes:
         routes = parse_routes(args.routes)
     else:
-        routes = config.default_routes(parse_destinations(args.destinations) or None)
+        routes = config.default_routes(parse_destinations(args.destinations) or None, parse_origins(args.origins))
     dates = build_dates(args.start, args.end, args.days)
     log.info("routes=%d (%s) dates=%s..%s", len(routes), ",".join(f"{o}-{d}" for o, d in routes), dates[0], dates[-1])
 
     run_id = database.start_run("mock" if args.mock else args.mode, routes, args.promo)
+    summary: dict = {}
+    status, exit_code = "failed", 1
+    try:
+        if args.mock:
+            flights = generate_mock_flights(dates[0], len(dates), routes, seed=args.mock_seed, discount=args.mock_sale)
+            written = database.upsert_flights(flights)
+            for origin, dest in routes:
+                if config.PRIMARY_HOME in (origin, dest):  # the mock schedule only flies PRIMARY_HOME routes
+                    database.record_seen(run_id, origin, dest, scheduled_days(origin, dest, dates), flights)
+            log.info("mock mode: wrote %d flights", written)
+            summary = {"flights_written": written, "mock": True}
+            status, exit_code = "ok", 0
+        else:
+            from scraper import AveloScraper  # imported lazily so --mock works without Playwright
 
-    if args.mock:
-        flights = generate_mock_flights(dates[0], len(dates), routes, seed=args.mock_seed, discount=args.mock_sale)
-        written = database.upsert_flights(flights)
-        for origin, dest in routes:
-            database.record_seen(run_id, origin, dest, scheduled_days(origin, dest, dates), flights)
-        log.info("mock mode: wrote %d flights", written)
-        summary = {"flights_written": written, "mock": True}
-        exit_code = 0
-    else:
-        from scraper import AveloScraper  # imported lazily so --mock works without Playwright
+            scraper = AveloScraper(headless=not args.headful and config.HEADLESS, mode=args.mode, promo_code=args.promo, run_id=run_id)
+            started = datetime.now()
+            report = asyncio.run(scraper.run(routes, dates))
+            log.info(
+                "done in %s: %d flights written, %d/%d searches ok, %d failed, %d routes skipped (not scheduled)",
+                datetime.now() - started, report.flights_written, report.succeeded, report.attempted,
+                report.failed, len(report.skipped_routes),
+            )
+            if report.skipped_routes:
+                log.info("skipped (Avelo has no flights in range): %s", ", ".join(report.skipped_routes))
+            for failure in report.failures:
+                log.warning("failed: %s", failure)
+            summary = {
+                "flights_written": report.flights_written, "attempted": report.attempted, "succeeded": report.succeeded,
+                "failed": report.failed, "skipped": report.skipped_routes, "failures": report.failures,
+            }
+            if report.failed == 0:
+                status, exit_code = "ok", 0
+            else:
+                status, exit_code = ("partial" if report.succeeded else "failed"), 1
 
-        scraper = AveloScraper(headless=not args.headful and config.HEADLESS, mode=args.mode, promo_code=args.promo, run_id=run_id)
-        started = datetime.now()
-        report = asyncio.run(scraper.run(routes, dates))
-        log.info(
-            "done in %s: %d flights written, %d/%d searches ok, %d failed, %d routes skipped (not scheduled)",
-            datetime.now() - started,
-            report.flights_written,
-            report.succeeded,
-            report.attempted,
-            report.failed,
-            len(report.skipped_routes),
-        )
-        if report.skipped_routes:
-            log.info("skipped (Avelo has no flights in range): %s", ", ".join(report.skipped_routes))
-        for failure in report.failures:
-            log.warning("failed: %s", failure)
-        summary = {
-            "flights_written": report.flights_written, "attempted": report.attempted, "succeeded": report.succeeded,
-            "failed": report.failed, "skipped": report.skipped_routes, "failures": report.failures,
-        }
-        exit_code = 0 if report.failed == 0 else 1
-
-    if not args.no_alerts:
-        signal_events = signals.run_detection(run_id)
-        summary["signals"] = len(signal_events)
-        summary["alerts"] = alerts.evaluate_and_deliver(run_id, signal_events)
-    database.finish_run(run_id, summary)
+        if not args.no_alerts:
+            signal_events = signals.run_detection(run_id, allow_sold_out=(status == "ok"))
+            summary["signals"] = len(signal_events)
+            summary["alerts"] = alerts.evaluate_and_deliver(run_id, signal_events)
+    except Exception as exc:  # noqa: BLE001 - always close the run row
+        log.exception("scrape crashed: %s", exc)
+        summary["error"] = repr(exc)[:500]
+        status, exit_code = "failed", 1
+    finally:
+        database.finish_run(run_id, summary, status=status)
     return exit_code
 
 
