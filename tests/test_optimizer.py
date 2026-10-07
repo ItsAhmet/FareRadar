@@ -2,6 +2,7 @@ from datetime import date, datetime, time
 
 import pytest
 
+import config
 import database as db
 from config import HomeCost
 from models import Flight
@@ -400,3 +401,36 @@ def test_typical_price_is_per_airline():
     assert its[("F9", "F9")].typical_total == 120 and its[("XP", "XP")].typical_total == 400
     assert its[("XP", "F9")].typical_total == 260          # each leg against its own airline's median
     conn.close()
+
+
+def test_carry_on_is_charged_per_leg_by_airline(monkeypatch):
+    monkeypatch.setattr(config, "CARRY_ON_FEE", {"XP": 0.0, "F9": 55.0})
+    outs = [leg("XP", "PHL", "TPA", 8, 8, 90), leg("F9", "PHL", "TPA", 8, 9, 60)]
+    backs = [leg("XP", "TPA", "PHL", 11, 15, 80), leg("F9", "TPA", "PHL", 11, 16, 50)]
+    plain = {i.airlines: i for i in build_itineraries(outs, backs, q(origins=["PHL"]))}
+    assert plain[("F9", "F9")].total_price == 110 and plain[("F9", "F9")].carry_on_cost == 0
+    counted = {i.airlines: i for i in build_itineraries(outs, backs, q(origins=["PHL"], count_carry_on=True))}
+    assert counted[("F9", "F9")].carry_on_cost == 110 and counted[("F9", "F9")].total_price == 220
+    assert counted[("XP", "F9")].carry_on_cost == 55 and counted[("XP", "F9")].total_price == 90 + 50 + 55
+    assert counted[("XP", "XP")].total_price == 170
+    assert rank_by_price(list(counted.values()))[0].airlines == ("XP", "XP")     # bags flip the ranking
+    assert "Carry-on" in to_dataframe(list(counted.values())).columns
+
+
+def test_budget_counts_the_carry_on_when_asked(monkeypatch):
+    monkeypatch.setattr(config, "CARRY_ON_FEE", {"XP": 0.0, "F9": 55.0})
+    outs, backs = [leg("F9", "PHL", "TPA", 8, 9, 60)], [leg("F9", "TPA", "PHL", 11, 16, 50)]
+    assert len(build_itineraries(outs, backs, q(origins=["PHL"], max_budget=150))) == 1
+    assert build_itineraries(outs, backs, q(origins=["PHL"], max_budget=150, count_carry_on=True)) == []
+
+
+def test_program_savings_counts_only_legs_paid_at_the_public_fare():
+    out = leg("F9", "PHL", "TPA", 8, 9, 84, base=84, den=83)                 # not a member: pays 84, Den is 83
+    back_member = Flight(airline="XP", origin="TPA", destination="PHL", departure_datetime=datetime(2026, 10, 11, 15),
+                         price=70, base_price=99, member_price=70, is_member_fare=True, duration_minutes=150, flight_id="XP-b")
+    (it,) = build_itineraries([out], [back_member], q(origins=["PHL"]))
+    assert it.program_savings == 1.0                                          # only the Frontier leg
+    assert to_dataframe([it])["Program would save"].iloc[0] == 1.0
+    no_den = leg("F9", "TPA", "PHL", 11, 16, 50)                              # program fare unknown
+    (it2,) = build_itineraries([out], [no_den], q(origins=["PHL"]))
+    assert it2.program_savings == 1.0

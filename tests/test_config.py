@@ -72,3 +72,8 @@ def test_airline_settings_and_frontier_airports():
     assert config.airport_name("DEN") == "Denver" and config.distance_miles("PHL", "DEN") > 1400
     assert config.storage_state_path("f9").name == "browser_state_F9.json"
     assert set(config.FRONTIER_ROUTE_PAGES) == {"PHL", "BWI"}
+
+
+def test_carry_on_fee_estimates():
+    assert set(config.CARRY_ON_FEE) == set(config.KNOWN_AIRLINES)
+    assert config.CARRY_ON_FEE["XP"] >= 0 and config.CARRY_ON_FEE["F9"] > 0

@@ -164,6 +164,7 @@ class GetawayQuery:
     max_pair_miles: float = 100.0
     allow_open_jaw: bool = False  # may a trip return to a different home airport?
     airlines: set[str] = field(default_factory=lambda: set(config.KNOWN_AIRLINES))  # whose fares to build from
+    count_carry_on: bool = False  # add each airline's carry-on fee per leg
 
     def __post_init__(self) -> None:
         self.destinations = {d.upper() for d in self.destinations}
@@ -202,6 +203,7 @@ class Itinerary:
     # Filled by `enrich_home()`: getting to and from the home airports.
     home_drive_min: float | None = None  # home→departure airport + return airport→home (+ inter-home if open-jaw)
     parking_cost: float = 0.0            # parking at the departure home airport for the trip
+    count_carry_on: bool = False         # set from the query: whether carry-on fees are in the total
 
     @property
     def drive_total_min(self) -> float | None:
@@ -226,14 +228,31 @@ class Itinerary:
         return round(self.outbound.price + self.inbound.price, 2)
 
     @property
+    def carry_on_cost(self) -> float:
+        """One carry-on per leg at each leg's airline's fee, when the query asked to count bags."""
+        if not self.count_carry_on:
+            return 0.0
+        return round(sum(config.CARRY_ON_FEE.get(code, 0.0) for code in self.airlines), 2)
+
+    @property
     def addon_fees(self) -> float:
-        """Carry-on and seat selection: $0 for an Avelo PLUS member."""
-        return BENEFITS.total
+        """Avelo PLUS perks ($0) on Avelo legs, plus carry-on fees when they are being counted."""
+        perks = BENEFITS.total if "XP" in self.airlines else 0.0
+        return round(perks + self.carry_on_cost, 2)
 
     @property
     def total_price(self) -> float:
-        """Total Getaway Cost: both member fares plus (zero) member add-on fees."""
+        """Total Getaway Cost: what the owner pays for both fares plus add-on fees."""
         return round(self.fare_total + self.addon_fees, 2)
+
+    @property
+    def program_savings(self) -> float:
+        """What the airlines' membership programs would take off legs the owner pays the public fare on."""
+        saved = 0.0
+        for f in (self.outbound, self.inbound):
+            if not f.is_member_fare and f.member_price is not None:
+                saved += max(f.price - f.member_price, 0.0)
+        return round(saved, 2)
 
     @property
     def deal_pct(self) -> float | None:
@@ -421,9 +440,10 @@ def build_itineraries(outbounds: list[Flight], inbounds: list[Flight], query: Ge
                         continue
                     if (back.departure_date - out.departure_date).days < query.min_nights:
                         continue
-                    if query.max_budget is not None and out.price + back.price > query.max_budget:
+                    it = Itinerary(out, back, w, fit_score(out, back, w), count_carry_on=query.count_carry_on)
+                    if query.max_budget is not None and it.total_price > query.max_budget:
                         continue
-                    results.append(Itinerary(out, back, w, fit_score(out, back, w)))
+                    results.append(it)
     return results
 
 
@@ -586,12 +606,14 @@ def to_dataframe(itineraries: list[Itinerary]) -> pd.DataFrame:
                 "Back Price": it.inbound.price,
                 "Total Getaway Cost": it.total_price,
                 "Add-on Fees": it.addon_fees,
+                "Carry-on": it.carry_on_cost,
                 "Deal vs Typical": it.deal_pct,
                 "Trend": it.trend,
                 "Nights": it.nights,
                 "Fit": it.fit,
                 "Member Fare": it.member_fare,
                 "Savings vs Public": it.savings,
+                "Program would save": it.program_savings,
                 "Times Verified": it.time_verified,
                 "Airport Gap (mi)": it.pair_miles,
                 "Sun Score": it.sun_score,

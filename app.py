@@ -150,6 +150,7 @@ def run_search(query: GetawayQuery) -> list[Itinerary]:
         tuple(query.origins),
         query.allow_open_jaw,
         tuple(sorted(query.airlines)),
+        query.count_carry_on,
         _db_version(),
     )
     cache = _search_cache()
@@ -865,6 +866,9 @@ def results_table(ranked: list[Itinerary], version: float = 0.0) -> None:
             "Back Price": st.column_config.NumberColumn(format="$%d"),
             "Total Getaway Cost": st.column_config.NumberColumn(format="$%d"),
             "Savings vs Public": st.column_config.NumberColumn(format="$%d"),
+            "Program would save": st.column_config.NumberColumn(
+                format="$%d",
+                help="What the airline's membership program (e.g. Frontier Discount Den) would take off the legs you pay the public fare on."),
             "Add-on Fees": st.column_config.NumberColumn(format="$%.2f"),
             "Deal vs Typical": st.column_config.NumberColumn(format="%+.0f%%", help="Positive = cheaper than the median fare on these routes"),
             "Fit": st.column_config.ProgressColumn("Fit", min_value=0, max_value=1, format="%.0f%%"),
@@ -888,7 +892,7 @@ def results_table(ranked: list[Itinerary], version: float = 0.0) -> None:
             "Out Route", "Out Date", "Out Time", "Out Price",
             "Back Route", "Back Date", "Back Time", "Back Price",
             "Nights", "Fit", "Sun Score", "Δ°F vs home", "Drive (min)", "Door-to-door", "Home-side $",
-            "Member Fare", "Savings vs Public", "Add-on Fees", "Times Verified",
+            "Member Fare", "Savings vs Public", "Program would save", "Add-on Fees", "Times Verified",
             "Airport Gap (mi)", "Last Scraped",
         ],
     )

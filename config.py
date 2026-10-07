@@ -158,6 +158,13 @@ ALL_AIRPORTS: dict[str, Airport] = {**HOME_AIRPORT_INFO, **DESTINATIONS, **FRONT
 KNOWN_AIRLINES: tuple[str, ...] = ("XP", "F9")  # Avelo, Frontier
 DEFAULT_MEMBERSHIPS: dict[str, bool] = {"XP": True, "F9": False}  # Avelo PLUS member; not in Discount Den
 
+# What one carry-on bag costs per flight leg, per airline. Estimates the owner can change (env): only added to a
+# package's cost when the carry-on toggle is on, so a bare fare is never compared with a fare that includes a bag.
+CARRY_ON_FEE: dict[str, float] = {
+    "XP": float(os.getenv("AVELO_CARRY_ON_XP", "0")),
+    "F9": float(os.getenv("AVELO_CARRY_ON_F9", "55")),
+}
+
 
 def parse_airline_codes(raw: str) -> list[str]:
     """Known airline codes from a comma list, in order, de-duplicated; Avelo if none."""
