@@ -26,7 +26,7 @@ log = logging.getLogger(__name__)
 
 
 def save_calendar(run_id: int | None, origin: str, dest: str, covered_days: Iterable[date], flights: list[Flight],
-                  conn: sqlite3.Connection | None = None) -> int:
+                  conn: sqlite3.Connection | None = None, airline: str = "XP") -> int:
     """Calendar result: one lowest fare per priced day; covered days without a fare are cleared.
 
     `covered_days` must hold only days the search positively answered for. A month
@@ -37,30 +37,31 @@ def save_calendar(run_id: int | None, origin: str, dest: str, covered_days: Iter
     written = database.upsert_flights(flights, conn)
     for day in covered:
         if day not in priced:
-            removed = database.delete_day(origin, dest, day, conn=conn)
+            removed = database.delete_day(origin, dest, day, conn=conn, airline=airline)
             if removed:
                 log.info("%s→%s %s: no longer offered, removed %d stored fare(s)", origin, dest, day, removed)
     if run_id is not None and covered:
         database.record_seen(run_id, origin, dest, covered, flights, conn)
-    database.drop_shadowed_placeholders(origin, dest, conn)
+    database.drop_shadowed_placeholders(origin, dest, conn, airline=airline)
     return written
 
 
 def save_day(run_id: int | None, origin: str, dest: str, day: date, flights: list[Flight],
-             conn: sqlite3.Connection | None = None) -> int:
+             conn: sqlite3.Connection | None = None, airline: str = "XP") -> int:
     """Detail result for one day: it replaces every stored row for that day."""
-    database.delete_day(origin, dest, day, conn=conn)
+    database.delete_day(origin, dest, day, conn=conn, airline=airline)
     written = database.upsert_flights(flights, conn)
     if run_id is not None:
         database.record_seen(run_id, origin, dest, [day], flights, conn)
     return written
 
 
-def clear_unscheduled(origin: str, dest: str, days: Iterable[date], conn: sqlite3.Connection | None = None) -> int:
-    """Delete stored fares on route-days Avelo's schedule no longer lists. Records no sighting."""
+def clear_unscheduled(origin: str, dest: str, days: Iterable[date], conn: sqlite3.Connection | None = None,
+                      airline: str = "XP") -> int:
+    """Delete one airline's stored fares on route-days its schedule no longer lists. Records no sighting."""
     days = sorted(set(days))
-    removed = database.delete_days(origin, dest, days, conn)
+    removed = database.delete_days(origin, dest, days, conn, airline=airline)
     if removed:
-        log.info("%s→%s: %d stored fare(s) on days no longer in Avelo's schedule removed (%s..%s)",
+        log.info("%s→%s: %d stored fare(s) on days no longer in the airline's schedule removed (%s..%s)",
                  origin, dest, removed, days[0], days[-1])
     return removed

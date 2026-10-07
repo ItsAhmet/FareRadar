@@ -344,19 +344,21 @@ def prune_history(conn: sqlite3.Connection | None = None, now: datetime | None =
     return _run("DELETE FROM price_history WHERE departure_datetime < ?", (cutoff,), conn)
 
 
-def drop_shadowed_placeholders(origin: str, destination: str, conn: sqlite3.Connection | None = None) -> int:
-    """Remove LOWFARE- calendar rows on days that already have detail (AVELO-) rows,
-    so a calendar run after a detail run never duplicates a flight."""
+def drop_shadowed_placeholders(origin: str, destination: str, conn: sqlite3.Connection | None = None,
+                               airline: str = "XP") -> int:
+    """Remove an airline's calendar placeholders (no arrival time) on days where the
+    same airline already has timed rows, so a calendar run after a detail run never
+    duplicates a flight."""
     sql = """
         DELETE FROM avelo_flights
-        WHERE origin = ? AND destination = ? AND flight_id LIKE 'LOWFARE-%'
+        WHERE airline = ? AND origin = ? AND destination = ? AND arrival_datetime IS NULL
           AND substr(departure_datetime, 1, 10) IN (
               SELECT substr(departure_datetime, 1, 10) FROM avelo_flights
-              WHERE origin = ? AND destination = ? AND flight_id LIKE 'AVELO-%'
+              WHERE airline = ? AND origin = ? AND destination = ? AND arrival_datetime IS NOT NULL
           )
     """
-    o, d = origin.upper(), destination.upper()
-    return _run(sql, (o, d, o, d), conn)
+    a, o, d = airline.upper(), origin.upper(), destination.upper()
+    return _run(sql, (a, o, d, a, o, d), conn)
 
 
 def maintenance(conn: sqlite3.Connection | None = None, now: datetime | None = None) -> dict[str, int]:
@@ -373,31 +375,35 @@ def delete_day(
     day: date,
     flight_id_prefix: str | None = None,
     conn: sqlite3.Connection | None = None,
+    airline: str = "XP",
 ) -> int:
-    """Delete one route's flights on one day, optionally only those whose
+    """Delete one airline's flights on one route-day, optionally only those whose
     flight_id starts with `flight_id_prefix`."""
     sql = """
         DELETE FROM avelo_flights
-        WHERE origin = ? AND destination = ?
+        WHERE airline = ? AND origin = ? AND destination = ?
           AND departure_datetime >= ? AND departure_datetime < ?
     """
-    params: list = [origin.upper(), destination.upper(), day.isoformat(), (day + timedelta(days=1)).isoformat()]
+    params: list = [airline.upper(), origin.upper(), destination.upper(), day.isoformat(),
+                    (day + timedelta(days=1)).isoformat()]
     if flight_id_prefix:
         sql += " AND flight_id LIKE ?"
         params.append(f"{flight_id_prefix}%")
     return _run(sql, params, conn)
 
 
-def delete_days(origin: str, destination: str, days: Iterable[date], conn: sqlite3.Connection | None = None) -> int:
-    """Delete one route's flights on any of `days` in one statement."""
+def delete_days(origin: str, destination: str, days: Iterable[date], conn: sqlite3.Connection | None = None,
+                airline: str = "XP") -> int:
+    """Delete one airline's flights on one route on any of `days` in one statement."""
     keys = sorted({d.isoformat() for d in days})
     if not keys:
         return 0
     sql = f"""
         DELETE FROM avelo_flights
-        WHERE origin = ? AND destination = ? AND substr(departure_datetime, 1, 10) IN ({_placeholders(keys)})
+        WHERE airline = ? AND origin = ? AND destination = ?
+          AND substr(departure_datetime, 1, 10) IN ({_placeholders(keys)})
     """
-    return _run(sql, [origin.upper(), destination.upper(), *keys], conn)
+    return _run(sql, [airline.upper(), origin.upper(), destination.upper(), *keys], conn)
 
 
 # --------------------------------------------------------------------------- #

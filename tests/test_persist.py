@@ -61,3 +61,43 @@ def test_sold_out_day_search_clears_the_day_and_records_none(conn):
     assert persist.save_day(run, "ILG", "TPA", date(2026, 10, 10), [], conn) == 0
     assert days_stored(conn) == []
     assert db.seen_in_run(run, "ILG", "TPA", conn) == {date(2026, 10, 10): None}
+
+
+def f9_timed(day, hour, price):
+    return Flight(origin="ILG", destination="TPA", departure_datetime=datetime(2026, 10, day, hour), price=price,
+                  duration_minutes=150, airline="F9", flight_number="77", flight_id="F9-77-ILG-TPA")
+
+
+def f9_cal(day, price):
+    return Flight(origin="ILG", destination="TPA", departure_datetime=datetime(2026, 10, day), price=price,
+                  airline="F9", flight_id="F9CAL-ILG-TPA")
+
+
+def airlines_on(conn, day):
+    return sorted((f.airline, f.flight_id) for f in db.query_flights(["ILG"], ["TPA"], date(2026, 10, day), date(2026, 10, day), conn=conn))
+
+
+def test_an_avelo_search_never_removes_frontier_fares(conn):
+    db.upsert_flights([f9_timed(10, 9, 60), f9_cal(12, 55), detail(10, 10, 80), cal(12, 70)], conn)
+    persist.save_day(None, "ILG", "TPA", date(2026, 10, 10), [], conn)                       # Avelo: sold out
+    persist.save_calendar(None, "ILG", "TPA", [date(2026, 10, 12)], [], conn)                # Avelo: day lost its fare
+    persist.clear_unscheduled("ILG", "TPA", [date(2026, 10, 10), date(2026, 10, 12)], conn)  # Avelo schedule dropped them
+    assert airlines_on(conn, 10) == [("F9", "F9-77-ILG-TPA")]
+    assert airlines_on(conn, 12) == [("F9", "F9CAL-ILG-TPA")]
+
+
+def test_a_frontier_search_never_removes_avelo_fares(conn):
+    db.upsert_flights([f9_timed(10, 9, 60), detail(10, 10, 80), cal(12, 70)], conn)
+    persist.save_day(None, "ILG", "TPA", date(2026, 10, 10), [], conn, airline="F9")
+    persist.save_calendar(None, "ILG", "TPA", [date(2026, 10, 12)], [], conn, airline="F9")
+    assert airlines_on(conn, 10) == [("XP", "AVELO-ILG-TPA")]
+    assert airlines_on(conn, 12) == [("XP", "LOWFARE-ILG-TPA")]
+
+
+def test_placeholders_are_shadowed_only_by_their_own_airline(conn):
+    db.upsert_flights([f9_cal(10, 55), detail(10, 10, 80)], conn)        # Avelo detail row, Frontier placeholder
+    persist.save_calendar(None, "ILG", "TPA", [date(2026, 10, 10)], [f9_cal(10, 50)], conn, airline="F9")
+    assert airlines_on(conn, 10) == [("F9", "F9CAL-ILG-TPA"), ("XP", "AVELO-ILG-TPA")]
+    db.upsert_flights([f9_timed(10, 9, 60)], conn)
+    persist.save_calendar(None, "ILG", "TPA", [date(2026, 10, 10)], [f9_cal(10, 50)], conn, airline="F9")
+    assert airlines_on(conn, 10) == [("F9", "F9-77-ILG-TPA"), ("XP", "AVELO-ILG-TPA")]   # F9 placeholder shadowed
