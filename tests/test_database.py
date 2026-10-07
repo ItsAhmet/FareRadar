@@ -520,3 +520,15 @@ def test_nonstop_flag_is_tristate_and_rechecked(conn):
     assert db.route_nonstop("F9", "PHL", "MCO", conn, now=datetime(2027, 3, 1)) is True     # "yes" does not expire
     db.set_route_nonstop("F9", "PHL", "DEN", True, conn, now=t0)                             # unknown route: created
     assert db.route_nonstop("F9", "PHL", "DEN", conn, now=t0) is True
+
+
+def test_search_created_catalog_row_is_not_a_listing(conn):
+    t0 = datetime(2026, 10, 7, 9)
+    db.set_route_nonstop("F9", "PHL", "MCO", True, conn, now=t0)                    # e.g. first run was `--routes PHL-MCO`
+    assert db.catalog_checked("F9", "PHL", conn) is None                            # route page still unread
+    assert db.catalog_routes("F9", origins=["PHL"], conn=conn, now=t0) == []        # not a route the airline listed
+    assert db.route_nonstop("F9", "PHL", "MCO", conn, now=t0) is True               # the probe result is kept
+    db.upsert_catalog("F9", [("PHL", "MCO")], "route-page", conn, now=t0)           # the route page later lists it
+    assert db.catalog_checked("F9", "PHL", conn) == t0
+    assert db.catalog_routes("F9", origins=["PHL"], conn=conn, now=t0) == [("PHL", "MCO")]
+    assert db.route_nonstop("F9", "PHL", "MCO", conn, now=t0) is True

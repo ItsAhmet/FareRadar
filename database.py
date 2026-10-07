@@ -1059,7 +1059,8 @@ def catalog_routes(airline: str, origins: Iterable[str] | None = None, destinati
     `destinations` the far ends: a route is kept when one end is in each (either direction)."""
     cutoff = ((now or datetime.now()) - timedelta(days=max_age_days)).isoformat(timespec="seconds")
     rows = _fetch("""SELECT origin, destination FROM route_catalog
-                     WHERE airline = ? AND last_seen >= ? ORDER BY origin, destination""", (airline.upper(), cutoff), conn)
+                     WHERE airline = ? AND last_seen >= ? AND source <> 'search'
+                     ORDER BY origin, destination""", (airline.upper(), cutoff), conn)
     homes = {o.upper() for o in origins} if origins is not None else None
     away = {d.upper() for d in destinations} if destinations is not None else None
     out = []
@@ -1074,8 +1075,9 @@ def catalog_routes(airline: str, origins: Iterable[str] | None = None, destinati
 
 
 def catalog_checked(airline: str, origin: str, conn: sqlite3.Connection | None = None) -> datetime | None:
-    """When this airline's routes from `origin` were last confirmed (None = never)."""
-    rows = _fetch("SELECT MAX(last_seen) AS seen FROM route_catalog WHERE airline = ? AND origin = ?",
+    """When this airline's routes from `origin` were last confirmed by a listing (None = never).
+    Rows created by a nonstop probe (source 'search') are not listings and are ignored."""
+    rows = _fetch("SELECT MAX(last_seen) AS seen FROM route_catalog WHERE airline = ? AND origin = ? AND source <> 'search'",
                   (airline.upper(), origin.upper()), conn)
     return datetime.fromisoformat(rows[0]["seen"]) if rows and rows[0]["seen"] else None
 
@@ -1095,6 +1097,8 @@ def route_nonstop(airline: str, origin: str, destination: str, conn: sqlite3.Con
 
 def set_route_nonstop(airline: str, origin: str, destination: str, nonstop: bool,
                       conn: sqlite3.Connection | None = None, now: datetime | None = None) -> None:
+    """Record a nonstop probe result. A route not yet catalogued is created with source 'search',
+    which `catalog_routes` and `catalog_checked` ignore until a route-page listing upserts it."""
     stamp = _now(now)
     _run("""INSERT INTO route_catalog (airline, origin, destination, first_seen, last_seen, source, nonstop, nonstop_checked)
             VALUES (?, ?, ?, ?, ?, 'search', ?, ?)
