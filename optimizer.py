@@ -527,7 +527,7 @@ def find_itineraries(query: GetawayQuery, conn: sqlite3.Connection | None = None
     itineraries = build_itineraries(outbounds, inbounds, query)
     if not itineraries:
         return itineraries
-    medians = route_medians(query.origins, query.destinations, start, end, conn=conn)
+    medians = route_medians(query.origins, query.destinations, start, end, conn=conn, airlines=["XP"])
     keys = {(f.flight_id, f.departure_datetime) for it in itineraries for f in (it.outbound, it.inbound)}
     return enrich(itineraries, medians, previous_prices(keys, conn=conn))
 

@@ -359,3 +359,13 @@ def test_packages_use_avelo_rows_only_until_phase_3():
     its = find_itineraries(q(origins=["ILG", "PHL"]), conn=conn)
     assert {i.outbound.airline for i in its} == {"XP"} and len(its) == 1
     conn.close()
+
+
+def test_deal_score_medians_ignore_other_airlines():
+    conn = db.get_connection(":memory:")
+    cheap_f9 = [Flight(origin="ILG", destination="TPA", departure_datetime=datetime(2026, 10, 9, h), price=400,
+                       duration_minutes=150, airline="F9", flight_id=f"F9-{h}-ILG-TPA") for h in (9, 10, 11)]
+    db.upsert_flights([f("ILG", "TPA", 8, hour=8, price=100), f("TPA", "ILG", 11, hour=15, price=100), *cheap_f9], conn)
+    (it,) = find_itineraries(q(), conn=conn)
+    assert it.typical_total == 200      # Avelo medians only; F9 at 400 must not lift it
+    conn.close()

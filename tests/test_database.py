@@ -358,3 +358,64 @@ def test_baselines_are_per_airline(conn):
     f9_next = db.start_run("calendar", [("PHL", "MCO")], conn=conn, airline="F9")
     assert db.previous_run_for_route(f9_next, "PHL", "MCO", conn) == f9_run
     assert db.last_runs(1, conn)[0]["airline"] == "F9"
+
+
+def _xp(**kw):
+    base = dict(origin="ILG", destination="TPA", departure_datetime=datetime(2026, 10, 10, 9), duration_minutes=150,
+                flight_id="AVELO-ILG-TPA")
+    base.update(kw)
+    return Flight(**base)
+
+
+def test_member_price_cleared_when_program_fare_disappears(conn):
+    db.upsert_flights([_xp(price=77, base_price=119, member_price=77, is_member_fare=True)], conn)
+    db.upsert_flights([_xp(price=129, base_price=129, member_price=None, is_member_fare=False)], conn)
+    got = db.get_flight("AVELO-ILG-TPA", datetime(2026, 10, 10, 9), conn)
+    assert (got.price, got.member_price, got.is_member_fare) == (129, None, False)
+    # The Task 3 reprice shape must not resurrect a fare nobody offers.
+    conn.execute("UPDATE avelo_flights SET price = member_price, is_member_fare = 1 WHERE airline = 'XP' AND member_price IS NOT NULL")
+    assert db.get_flight("AVELO-ILG-TPA", datetime(2026, 10, 10, 9), conn).price == 129
+
+
+def test_member_fare_without_member_price_tracks_price(conn):
+    # What the Avelo scraper sends today: price is the member fare, member_price unset.
+    db.upsert_flights([_xp(price=77, base_price=119, is_member_fare=True)], conn)
+    db.upsert_flights([_xp(price=59, base_price=119, is_member_fare=True)], conn)
+    got = db.get_flight("AVELO-ILG-TPA", datetime(2026, 10, 10, 9), conn)
+    assert (got.price, got.member_price) == (59, 59)
+
+
+def test_member_price_follows_explicit_value(conn):
+    db.upsert_flights([_xp(price=77, base_price=119, member_price=77, is_member_fare=True)], conn)
+    db.upsert_flights([_xp(price=119, base_price=119, member_price=65, is_member_fare=False)], conn)
+    got = db.get_flight("AVELO-ILG-TPA", datetime(2026, 10, 10, 9), conn)
+    assert (got.price, got.member_price) == (119, 65)
+
+
+def test_member_price_not_stale_across_reopen(tmp_path):
+    path = tmp_path / "m.db"
+    c = db.get_connection(path)
+    db.upsert_flights([_xp(price=77, base_price=119, is_member_fare=True)], c)
+    c.close()
+    c = db.get_connection(path)                  # backfill sets member_price once
+    db.upsert_flights([_xp(price=59, base_price=119, is_member_fare=True)], c)
+    c.close()
+    c = db.get_connection(path)
+    got = db.get_flight("AVELO-ILG-TPA", datetime(2026, 10, 10, 9), c)
+    assert (got.price, got.member_price) == (59, 59)
+    c.close()
+
+
+def test_route_medians_and_calendar_can_be_scoped_to_airlines(conn):
+    db.upsert_flights([flight(origin="PHL", dest="MCO", day=10, hour=8, price=60, number="XP1"),
+                       f9(hour=9, price=300, number="1"), f9(hour=10, price=400, number="2"),
+                       f9(hour=11, price=20, number="3")], conn)
+    span = (date(2026, 10, 10), date(2026, 10, 10))
+    assert db.route_medians(["PHL"], ["MCO"], *span, conn=conn, airlines=["XP"]) == {("PHL", "MCO"): 60}
+    assert db.route_medians(["PHL"], ["MCO"], *span, conn=conn, airlines=["f9"]) == {("PHL", "MCO"): 300}
+    assert db.route_medians(["PHL"], ["MCO"], *span, conn=conn, airlines=[]) == {}
+    assert db.route_medians(["PHL"], ["MCO"], *span, conn=conn)[("PHL", "MCO")] == 180   # unscoped: all carriers
+    cal = db.route_calendar(*span, conn=conn, airlines=["XP"])
+    assert cal == [{"origin": "PHL", "destination": "MCO", "day": "2026-10-10", "min_price": 60, "flights": 1}]
+    assert db.route_calendar(*span, conn=conn, airlines=[]) == []
+    assert db.route_calendar(*span, conn=conn)[0]["min_price"] == 20

@@ -174,7 +174,9 @@ ON CONFLICT (flight_id, departure_datetime) DO UPDATE SET
     base_price        = COALESCE(excluded.base_price, avelo_flights.base_price),
     is_member_fare    = excluded.is_member_fare,
     promo_code        = excluded.promo_code,
-    member_price      = COALESCE(excluded.member_price, avelo_flights.member_price),
+    member_price      = CASE WHEN excluded.member_price IS NOT NULL THEN excluded.member_price
+                             WHEN excluded.is_member_fare = 1 THEN excluded.price
+                             ELSE NULL END,
     airline           = excluded.airline,
     timestamp_scraped = excluded.timestamp_scraped;
 """
@@ -458,17 +460,31 @@ def query_flights(
     return [_from_row(r) for r in _fetch(sql, params, conn)]
 
 
-def route_calendar(start_date: date, end_date: date, conn: sqlite3.Connection | None = None) -> list[dict]:
-    """Lowest price per (origin, destination, day). Feeds the calendar view."""
-    sql = """
+def route_calendar(
+    start_date: date,
+    end_date: date,
+    conn: sqlite3.Connection | None = None,
+    airlines: Iterable[str] | None = None,
+) -> list[dict]:
+    """Lowest price per (origin, destination, day). Feeds the calendar view.
+    `airlines` restricts to those carriers (None = all)."""
+    params: list = [start_date.isoformat(), (end_date + timedelta(days=1)).isoformat()]
+    airline_sql = ""
+    if airlines is not None:
+        codes = [a.upper() for a in airlines]
+        if not codes:
+            return []
+        airline_sql = f" AND airline IN ({_placeholders(codes)})"
+        params.extend(codes)
+    sql = f"""
         SELECT origin, destination, substr(departure_datetime, 1, 10) AS day,
                MIN(price) AS min_price, COUNT(*) AS flights
         FROM avelo_flights
-        WHERE departure_datetime >= ? AND departure_datetime < ?
+        WHERE departure_datetime >= ? AND departure_datetime < ?{airline_sql}
         GROUP BY origin, destination, day
         ORDER BY day
     """
-    return [dict(r) for r in _fetch(sql, (start_date.isoformat(), (end_date + timedelta(days=1)).isoformat()), conn)]
+    return [dict(r) for r in _fetch(sql, params, conn)]
 
 
 def stats(conn: sqlite3.Connection | None = None) -> dict:
@@ -541,21 +557,30 @@ def route_medians(
     start_date: date,
     end_date: date,
     conn: sqlite3.Connection | None = None,
+    airlines: Iterable[str] | None = None,
 ) -> dict[tuple[str, str], float]:
     """Median current fare per directional route in the span: the 'typical'
-    price a package is compared against for its deal score."""
+    price a package is compared against for its deal score. `airlines`
+    restricts to those carriers (None = all)."""
     origins, destinations = _codes(origins), [d.upper() for d in destinations]
     if not destinations or not origins:
         return {}
     po, pd_ = _placeholders(origins), _placeholders(destinations)
+    params = [*origins, *destinations, *origins, *destinations,
+              start_date.isoformat(), (end_date + timedelta(days=1)).isoformat()]
+    airline_sql = ""
+    if airlines is not None:
+        codes = [a.upper() for a in airlines]
+        if not codes:
+            return {}
+        airline_sql = f" AND airline IN ({_placeholders(codes)})"
+        params.extend(codes)
     sql = f"""
         SELECT origin, destination, price FROM avelo_flights
         WHERE ((origin IN ({po}) AND destination IN ({pd_})) OR (destination IN ({po}) AND origin IN ({pd_})))
-          AND departure_datetime >= ? AND departure_datetime < ?
+          AND departure_datetime >= ? AND departure_datetime < ?{airline_sql}
         ORDER BY origin, destination, price
     """
-    params = [*origins, *destinations, *origins, *destinations,
-              start_date.isoformat(), (end_date + timedelta(days=1)).isoformat()]
     prices: dict[tuple[str, str], list[float]] = {}
     for r in _fetch(sql, params, conn):
         prices.setdefault((r["origin"], r["destination"]), []).append(r["price"])
