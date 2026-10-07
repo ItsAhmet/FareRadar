@@ -331,7 +331,7 @@ def test_deliver_signals_pushes_route_signals_on_watched_routes_only(isolated, m
     database.init_db()
     sent = []
     monkeypatch.setattr(alerts, "deliver", lambda pushes: sent.append([e.message for e in pushes]) or alerts.Delivery(pushed=len(pushes)))
-    monkeypatch.setattr(alerts, "watched_routes", lambda conn=None: {("ILG", "TPA")})
+    monkeypatch.setattr(alerts, "watched_routes", lambda conn=None: {("XP", "ILG", "TPA")})
     monkeypatch.setattr(alerts, "evaluate_packages", lambda *_a, **_k: 1 / 0)       # watches are not evaluated here
     events = [Event("sale_wave", "ILG", "TPA", date(2026, 11, 1), "watched"), Event("sale_wave", "ILG", "LAL", date(2026, 11, 1), "unwatched")]
     assert alerts.deliver_signals(events) == {"pushed": 1, "ntfy": None, "email": None}

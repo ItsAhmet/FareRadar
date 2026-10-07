@@ -65,7 +65,7 @@ def test_rule_alerts_only_on_new_matches(conn):
     db.add_watch("rule", "Anywhere", alerts.rule_payload(["TPA", "LAL"], Availability(2, time(18), 6, time(23, 59)), 1, 300, True, 100, 14), conn)
     events = alerts.evaluate_rules(conn, today=today)
     assert all(e.kind == "rule_match" for e in events) and any("Anywhere" in e.message for e in events)
-    assert alerts.watched_routes(conn) >= {("ILG", "TPA"), ("TPA", "ILG"), ("ILG", "LAL")}
+    assert alerts.watched_routes(conn) >= {("XP", "ILG", "TPA"), ("XP", "TPA", "ILG"), ("XP", "ILG", "LAL")}
 
 
 WINDOW = Window(datetime(2026, 10, 7, 18), datetime(2026, 10, 11, 23, 59))
@@ -110,10 +110,10 @@ def test_select_pushes_filters_route_signals_to_watched_routes():
         Event("rule_match", None, None, None, "match"),
         Event("floor_fare", "ILG", "TPA", None, "quiet", notify=False),
     ]
-    pushes = alerts.select_pushes(events, {("ILG", "TPA")})
+    pushes = alerts.select_pushes(events, {("XP", "ILG", "TPA")})
     assert [e.message for e in pushes] == ["sale", "match"]
     title, body = alerts.build_message(pushes)
-    assert title == "New Avelo getaway matches" and body.count("•") == 2
+    assert title == "New getaway matches" and body.count("•") == 2
 
 
 def test_delivery_is_noop_when_unconfigured_or_offline(monkeypatch):
@@ -191,7 +191,7 @@ def test_rule_origins_reach_the_query_and_watched_routes(conn):
     old = {k: v for k, v in payload.items() if k not in ("origins", "allow_open_jaw")}
     assert alerts.rule_query(old, today=date(2026, 10, 1)).origins == [config.PRIMARY_HOME]
     db.add_watch("rule", "r", payload, conn)
-    assert alerts.watched_routes(conn) >= {("ILG", "TPA"), ("TPA", "ILG"), ("PHL", "TPA"), ("TPA", "PHL")}
+    assert alerts.watched_routes(conn) >= {("XP", "ILG", "TPA"), ("XP", "TPA", "ILG"), ("XP", "PHL", "TPA"), ("XP", "TPA", "PHL")}
 
 
 def test_rule_match_quotes_the_cheapest_flight_of_the_day(conn):
@@ -273,7 +273,44 @@ def test_frontier_fare_drop_is_raised_as_a_frontier_sale():
     assert "sale_wave" in {e.kind for e in events}
     assert all(e.airline == "F9" and e.message.startswith("Frontier PHL→MCO") for e in events)
     assert db.get_floor("PHL", "MCO", conn) is None and db.get_floor("PHL", "MCO", conn, airline="F9") == 60.0
+    # the rule above was saved before rules carried airlines, so it is Avelo-only: Frontier's sale is not pushed
+    assert alerts.select_pushes(events, alerts.watched_routes(conn)) == []
     conn.close()
+
+
+def test_rule_saved_before_airlines_does_not_push_a_frontier_sale(conn):
+    db.add_watch("rule", "Orlando weekends", {"origins": ["PHL"], "destinations": ["MCO"]}, conn=conn)   # no "airlines" key
+    watched = alerts.watched_routes(conn)
+    assert {("XP", "PHL", "MCO"), ("XP", "MCO", "PHL")} <= watched
+    assert not {w for w in watched if w[0] == "F9"}
+    f9_sale = Event("sale_wave", "PHL", "MCO", date(2026, 11, 12), "Frontier PHL→MCO: sale wave", airline="F9")
+    xp_sale = Event("sale_wave", "PHL", "MCO", date(2026, 11, 12), "Avelo PHL→MCO: sale wave", airline="XP")
+    assert alerts.select_pushes([f9_sale, xp_sale], watched) == [xp_sale]
+    assert alerts.build_message([xp_sale])[0] == "Avelo sale on a watched route"
+
+
+def test_route_signal_without_an_airline_counts_as_avelo(conn):
+    db.add_watch("rule", "Orlando weekends", {"origins": ["PHL"], "destinations": ["MCO"]}, conn=conn)
+    old = Event("sale_wave", "PHL", "MCO", date(2026, 11, 12), "PHL→MCO: sale wave")                    # airline=None
+    assert alerts.select_pushes([old], alerts.watched_routes(conn)) == [old]
+    assert alerts.select_pushes([old], {("F9", "PHL", "MCO")}) == []
+
+
+def test_route_signals_are_pushed_only_for_the_watched_airline(conn):
+    db.add_watch("rule", "Frontier Orlando", {"origins": ["PHL"], "destinations": ["MCO"], "airlines": ["F9"]}, conn=conn)
+    watched = alerts.watched_routes(conn)
+    assert ("F9", "PHL", "MCO") in watched and ("XP", "PHL", "MCO") not in watched
+    f9_sale = Event("sale_wave", "PHL", "MCO", date(2026, 11, 12), "Frontier PHL→MCO: sale wave", airline="F9")
+    xp_sale = Event("sale_wave", "PHL", "MCO", date(2026, 11, 12), "Avelo PHL→MCO: sale wave", airline="XP")
+    assert alerts.select_pushes([f9_sale, xp_sale], watched) == [f9_sale]
+    assert alerts.build_message([f9_sale])[0] == "Frontier sale on a watched route"
+    assert alerts.build_message([f9_sale, xp_sale])[0] == "Avelo & Frontier sale on a watched route"
+    assert alerts.build_message([Event("booked_drop", None, "TPA", None, "m")])[0] == "A booked trip got cheaper"
+
+
+def test_package_watch_watches_its_legs_airline(conn):
+    db.add_watch("package", "p", {"out_trip": "F9|PHL|MCO|2026-11-12|07:00", "in_trip": "XP|MCO|ILG|2026-11-15|*"}, conn=conn)
+    assert alerts.watched_routes(conn) == {("F9", "PHL", "MCO"), ("XP", "MCO", "ILG")}
 
 
 def test_watch_from_carry_on_counted_search_does_not_fake_a_price_drop(conn, monkeypatch):

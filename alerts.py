@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from email.message import EmailMessage
 
+import airlines as airline_registry
 import config
 import database
 import trips
@@ -244,34 +245,38 @@ def evaluate_rules(conn: sqlite3.Connection | None = None, today: date | None = 
     return events
 
 
-def watched_routes(conn: sqlite3.Connection | None = None) -> set[tuple[str, str]]:
-    routes: set[tuple[str, str]] = set()
+def watched_routes(conn: sqlite3.Connection | None = None) -> set[tuple[str, str, str]]:
+    """Every (airline, origin, destination) some watch cares about. A rule saved
+    before rules carried airlines (no "airlines" key) means Avelo only."""
+    routes: set[tuple[str, str, str]] = set()
     for watch in database.list_watches(conn=conn):
         p = watch["payload"]
         if watch["kind"] == "rule":
             homes = p.get("origins") or [config.PRIMARY_HOME]
-            for d in p.get("destinations", []):
-                for home in homes:
-                    routes.add((home, d))
-                    routes.add((d, home))
+            for code in p.get("airlines") or ["XP"]:
+                for d in p.get("destinations", []):
+                    for home in homes:
+                        routes.add((code.upper(), home, d))
+                        routes.add((code.upper(), d, home))
         else:
             for leg in ("out", "in"):
                 k = trips.payload_trip(p, leg)
                 if k:
                     tk = trips.parse(k)
-                    routes.add((tk.origin, tk.destination))
+                    routes.add((tk.airline.upper(), tk.origin, tk.destination))
     return routes
 
 
-def select_pushes(events: list[Event], watched: set[tuple[str, str]]) -> list[Event]:
+def select_pushes(events: list[Event], watched: set[tuple[str, str, str]]) -> list[Event]:
     """Which events deserve a push: watch-driven ones always, route signals
-    only on routes somebody is watching."""
+    only on routes somebody is watching with that airline. A route signal
+    without an airline (stored before signals carried one) is Avelo's."""
     pushes = []
     for e in events:
         if not e.notify:
             continue
         if e.kind in ROUTE_SIGNALS:
-            if (e.origin, e.destination) in watched:
+            if ((e.airline or "XP").upper(), e.origin, e.destination) in watched:
                 pushes.append(e)
         else:
             pushes.append(e)
@@ -292,14 +297,18 @@ class Delivery:
 
 def build_message(events: list[Event]) -> tuple[str, str]:
     kinds = {e.kind for e in events}
+    codes = sorted({e.airline for e in events if e.airline})
+    who = " & ".join(sorted(airline_registry.get(c).name for c in codes)) or "Fare"
     if "price_drop" in kinds:
-        title = "Avelo fare dropped"
+        title = f"{who} fare dropped"
+    elif "booked_drop" in kinds:
+        title = "A booked trip got cheaper"
     elif "rule_match" in kinds:
-        title = "New Avelo getaway matches"
+        title = f"New {who} getaway matches" if codes else "New getaway matches"
     elif "sale_wave" in kinds:
-        title = "Avelo sale on a watched route"
+        title = f"{who} sale on a watched route"
     else:
-        title = "Avelo fare update"
+        title = f"{who} fare update" if codes else "Fare update"
     body = "\n".join(f"• {e.message}" for e in events[:12])
     if len(events) > 12:
         body += f"\n… and {len(events) - 12} more"
