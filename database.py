@@ -674,6 +674,21 @@ def finish_run(run_id: int, summary: dict | None = None, conn: sqlite3.Connectio
          (_now(now), json.dumps(summary or {}), status, run_id), conn)
 
 
+def annotate_run(run_id: int, extra: dict, conn: sqlite3.Connection | None = None) -> None:
+    """Merge `extra` into a run's stored summary without touching its status or finish time."""
+    rows = _fetch("SELECT summary FROM scrape_runs WHERE run_id = ?", (run_id,), conn)
+    if rows:
+        summary = {**json.loads(rows[0]["summary"] or "{}"), **extra}
+        _run("UPDATE scrape_runs SET summary = ? WHERE run_id = ?", (json.dumps(summary), run_id), conn)
+
+
+def latest_run_ids(conn: sqlite3.Connection | None = None) -> list[int]:
+    """The newest run of each airline, newest first. A scrape writes one run row per airline, so "the
+    latest run" as the dashboard means it is this set, not the single newest row."""
+    rows = _fetch("SELECT MAX(run_id) AS run_id FROM scrape_runs GROUP BY airline ORDER BY run_id DESC", (), conn)
+    return [int(r["run_id"]) for r in rows]
+
+
 def last_runs(limit: int = 10, conn: sqlite3.Connection | None = None) -> list[dict]:
     rows = _fetch("SELECT * FROM scrape_runs ORDER BY run_id DESC LIMIT ?", (limit,), conn)
     out = []
@@ -792,8 +807,16 @@ def add_events(run_id: int | None, events: Iterable, conn: sqlite3.Connection | 
 
 
 def list_events(limit: int = 100, notify_only: bool = False, unread_only: bool = False,
-                run_id: int | None = None, conn: sqlite3.Connection | None = None) -> list[dict]:
+                run_id: int | None = None, conn: sqlite3.Connection | None = None,
+                run_ids: Iterable[int] | None = None) -> list[dict]:
+    """`run_ids` keeps events of any of those runs (an empty list matches nothing)."""
     where, params = [], []
+    if run_ids is not None:
+        run_ids = list(run_ids)
+        if not run_ids:
+            return []
+        where.append(f"run_id IN ({_placeholders(run_ids)})")
+        params.extend(run_ids)
     if notify_only:
         where.append("notify = 1")
     if unread_only:

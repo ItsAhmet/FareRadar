@@ -230,3 +230,23 @@ def test_packages_table_explains_door_to_door_and_home_side_costs(mock_db):
     door, home = columns["Door-to-door"]["help"], columns["Home-side $"]["help"]
     assert "Home-side" in door and "parking" in door
     assert "Parking" in home and "PHL $17" in home and "no dashboard control" in home
+
+
+def test_latest_run_signals_cover_every_airlines_newest_run(mock_db):
+    """One scrape writes a run row per airline; the Frontier row being newest must not hide Avelo's signals."""
+    from signals import Event
+
+    day = date.today()
+    stale = database.start_run("calendar", [("ILG", "TPA")])
+    xp = database.start_run("calendar", [("ILG", "TPA")])
+    f9 = database.start_run("calendar", [("PHL", "MCO")], airline="F9")
+    database.add_events(stale, [Event("sale_wave", "ILG", "SAV", day, "an older Avelo run")])
+    database.add_events(xp, [Event("sale_wave", "ILG", "TPA", day, "Avelo sale")])
+    database.add_events(f9, [Event("new_floor", "PHL", "MCO", day, "Frontier low")])
+    for run in (stale, xp, f9):
+        database.finish_run(run, {})
+
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    assert not at.exception, at.exception
+    table = next(d.value for d in at.dataframe if list(d.value.columns) == ["Kind", "Route", "Day", "Detail"])
+    assert sorted(table["Detail"]) == ["Avelo sale", "Frontier low"]

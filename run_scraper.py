@@ -94,10 +94,22 @@ def scraper_class(airline: str):
     return AveloScraper
 
 
-def routes_for(airline: str, args: argparse.Namespace) -> list[tuple[str, str]]:
-    """The directional routes one airline's scraper should visit for this request."""
+def can_fly(airline: str, route: tuple[str, str]) -> bool:
+    """Could this airline serve the route at all? Avelo: one end is one of its destinations.
+    Frontier: one end is a home airport Frontier flies from (the other end may be off-catalog)."""
+    served = config.FRONTIER_ROUTE_PAGES if airline == "F9" else config.DESTINATIONS
+    return any(code in served for code in route)
+
+
+def routes_for(airline: str, args: argparse.Namespace, airlines: list[str] | None = None) -> list[tuple[str, str]]:
+    """The directional routes one airline's scraper should visit for this request. `airlines` is every
+    airline in the request: with one, --routes is taken as given; with several, each airline gets only
+    the listed routes it could fly, so one airline's route is not a failed search for the other."""
     if args.routes:
-        return parse_routes(args.routes)
+        routes = parse_routes(args.routes)
+        if airlines and len(airlines) > 1:
+            return [r for r in routes if can_fly(airline, r)]
+        return routes
     destinations = parse_destinations(args.destinations) or None
     origins = parse_origins(args.origins)
     if airline == "F9":
@@ -210,24 +222,35 @@ def _run(args: argparse.Namespace, log: logging.Logger) -> int:
     promos = parse_promos(args.promo)
     airline_codes = ["XP"] if args.mock else parse_airlines(args.airlines)  # the mock schedule is Avelo's
 
-    work = [(code, routes_for(code, args)) for code in airline_codes]
+    work = [(code, routes_for(code, args, airline_codes)) for code in airline_codes]
     for code, routes in work:
         if not routes:
             log.info("%s: no routes for this request, skipping", code)
     work = [(code, routes) for code, routes in work if routes]
 
-    exit_code, signal_events = 0, []
-    for index, (code, routes) in enumerate(work):
-        last = index == len(work) - 1
+    exit_code, signal_events, run_ids = 0, [], []
+    for code, routes in work:
         log.info("%s: routes=%d (%s) dates=%s..%s", code, len(routes), ",".join(f"{o}-{d}" for o, d in routes), dates[0], dates[-1])
-        exit_code = max(exit_code, _run_airline(code, routes, dates, promos.get(code), args, log, signal_events, last))
+        exit_code = max(exit_code, _run_airline(code, routes, dates, promos.get(code), args, log, signal_events, run_ids))
+
+    # Alerts once per invocation, outside every airline's try block: a crash in one airline's scrape
+    # must not cost the other airlines' signals or the watch/rule/booking checks.
+    if run_ids and not args.no_alerts:
+        try:
+            database.annotate_run(run_ids[-1], {"alerts": alerts.evaluate_and_deliver(run_ids[-1], signal_events)})
+        except Exception as exc:  # noqa: BLE001 - the scrape results are already stored
+            log.exception("alerts failed: %s", exc)
+            database.annotate_run(run_ids[-1], {"alerts_error": repr(exc)[:500]})
+            exit_code = 1
     return exit_code
 
 
 def _run_airline(code: str, routes: list[tuple[str, str]], dates: list[date], promo: str | None,
-                 args: argparse.Namespace, log: logging.Logger, signal_events: list, last: bool) -> int:
-    """One airline's scrape = one scrape_runs row. Alerts are evaluated once, after the last airline."""
+                 args: argparse.Namespace, log: logging.Logger, signal_events: list, run_ids: list[int]) -> int:
+    """One airline's scrape = one scrape_runs row; its run id is appended to `run_ids` and its signal
+    events to `signal_events`. Alerts are evaluated by `_run`, once, after every airline."""
     run_id = database.start_run("mock" if args.mock else args.mode, routes, promo, airline=code)
+    run_ids.append(run_id)
     summary: dict = {}
     status, exit_code = "failed", 1
     try:
@@ -268,8 +291,6 @@ def _run_airline(code: str, routes: list[tuple[str, str]], dates: list[date], pr
             events = signals.run_detection(run_id, allow_sold_out=(status == "ok"))
             signal_events.extend(events)
             summary["signals"] = len(events)
-            if last:
-                summary["alerts"] = alerts.evaluate_and_deliver(run_id, signal_events)
     except Exception as exc:  # noqa: BLE001 - always close the run row
         log.exception("%s scrape crashed: %s", code, exc)
         summary["error"] = repr(exc)[:500]

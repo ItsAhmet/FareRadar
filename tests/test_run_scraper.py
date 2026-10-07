@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -219,3 +219,172 @@ def test_airline_without_routes_is_skipped_not_failed(isolated, monkeypatch):
 def test_mock_mode_is_avelo_only(isolated):
     assert run_scraper.main(["--mock", "--airlines", "XP,F9", "--destinations", "TPA", "--days", "7", "--no-alerts", "--origins", "ILG"]) == 0
     assert [r["airline"] for r in database.last_runs(5)] == ["XP"]
+
+
+# ---- alerts are evaluated once per invocation, after every airline (Task 8 fix round 1) ----
+import alerts
+import signals
+from signals import Event
+
+BOTH = ["--airlines", "XP,F9", "--origins", "ILG,PHL", "--destinations", "MCO,TPA", "--days", "5"]
+
+
+def _two_airlines(monkeypatch, plan, calls=None):
+    """XP and F9 scrapers that return a clean report, or raise when `plan[code]` is an exception; the F9
+    catalog lists PHL⇄MCO; signal detection yields one event per run and alert delivery is recorded."""
+    def cls_for(code):
+        class Fake:
+            def __init__(self, **_kw):
+                pass
+
+            async def run(self, routes, dates):
+                if calls is not None:
+                    calls.append((code, list(routes)))
+                if isinstance(plan.get(code), BaseException):
+                    raise plan[code]
+                return ScrapeReport(attempted=2, succeeded=2, flights_written=3)
+        return Fake
+
+    seen = {"detect": [], "deliver": []}
+
+    def detect(run_id, conn=None, allow_sold_out=True):
+        seen["detect"].append(run_id)
+        if isinstance(plan.get("detect"), BaseException):
+            raise plan["detect"]
+        return [Event("sale_wave", "ILG", "TPA", date(2026, 11, 1), f"run{run_id}")]
+
+    def deliver(run_id, events, conn=None):
+        seen["deliver"].append((run_id, [e.message for e in events]))
+        if isinstance(plan.get("deliver"), BaseException):
+            raise plan["deliver"]
+        return {"pushed": len(events)}
+
+    monkeypatch.setattr(run_scraper, "scraper_class", cls_for)
+    monkeypatch.setattr(frontier, "refresh_catalog", lambda origins, **_k: 0)
+    monkeypatch.setattr(signals, "run_detection", detect)
+    monkeypatch.setattr(alerts, "evaluate_and_deliver", deliver)
+    database.init_db()
+    database.upsert_catalog("F9", [("PHL", "MCO"), ("MCO", "PHL")], "route-page")
+    return seen
+
+
+def test_two_airlines_alert_once_with_the_events_of_both_runs(isolated, monkeypatch):
+    seen = _two_airlines(monkeypatch, {})
+    assert run_scraper.main(BOTH) == 0
+    assert seen["detect"] == [1, 2]
+    assert seen["deliver"] == [(2, ["run1", "run2"])]                     # one call, after the last airline
+    runs = {r["airline"]: r for r in database.last_runs(5)}
+    assert runs["F9"]["summary"]["alerts"] == {"pushed": 2} and "alerts" not in runs["XP"]["summary"]
+    assert runs["XP"]["summary"]["signals"] == runs["F9"]["summary"]["signals"] == 1
+    assert runs["F9"]["status"] == "ok" and runs["F9"]["summary"]["flights_written"] == 3
+
+
+def test_last_airline_crash_still_alerts_for_the_airlines_that_finished(isolated, monkeypatch):
+    seen = _two_airlines(monkeypatch, {"F9": RuntimeError("chromium failed to launch")})
+    assert run_scraper.main(BOTH) == 1
+    assert seen["detect"] == [1]                                          # the crashed run detects nothing
+    assert seen["deliver"] == [(2, ["run1"])]                             # Avelo's events are still pushed, once
+    runs = {r["airline"]: r for r in database.last_runs(5)}
+    assert runs["XP"]["status"] == "ok" and runs["F9"]["status"] == "failed"
+    assert "chromium" in runs["F9"]["summary"]["error"] and runs["F9"]["summary"]["alerts"] == {"pushed": 1}
+    assert not (isolated / "scrape.lock").exists()
+
+
+def test_signal_detection_crash_in_the_last_airline_still_alerts(isolated, monkeypatch):
+    seen = _two_airlines(monkeypatch, {})
+    real = signals.run_detection
+    monkeypatch.setattr(signals, "run_detection",
+                        lambda run_id, **k: real(run_id, **k) if run_id == 1 else (_ for _ in ()).throw(RuntimeError("detect")))
+    assert run_scraper.main(BOTH) == 1
+    assert seen["deliver"] == [(2, ["run1"])]
+
+
+def test_alert_failure_is_logged_sets_exit_code_and_keeps_the_runs(isolated, monkeypatch):
+    seen = _two_airlines(monkeypatch, {"deliver": RuntimeError("ntfy down")})
+    assert run_scraper.main(BOTH) == 1
+    assert len(seen["deliver"]) == 1
+    runs = {r["airline"]: r for r in database.last_runs(5)}
+    assert (runs["XP"]["status"], runs["F9"]["status"]) == ("ok", "ok")   # the scrapes themselves were fine
+    assert "ntfy down" in runs["F9"]["summary"]["alerts_error"]
+    assert not (isolated / "scrape.lock").exists()
+
+
+def test_no_alerts_flag_and_no_run_rows_mean_no_alert_evaluation(isolated, monkeypatch):
+    seen = _two_airlines(monkeypatch, {})
+    assert run_scraper.main(BOTH + ["--no-alerts"]) == 0
+    assert seen == {"detect": [], "deliver": []}
+    # no airline has routes -> no run row -> nothing to evaluate
+    assert run_scraper.main(["--airlines", "F9", "--origins", "BWI", "--destinations", "DEN", "--days", "3"]) == 0
+    assert seen["deliver"] == [] and len(database.last_runs(5)) == 2
+
+
+def test_latest_run_signals_still_include_avelo_after_a_two_airline_scrape(isolated, monkeypatch):
+    """The dashboard reads list_events(run_ids=latest_run_ids()); with one run row per airline the newest
+    row alone (Frontier's) would hide every signal the Avelo run raised in the same invocation."""
+    days = [date.today() + timedelta(days=i) for i in range(2, 8)]
+    price = {"v": 100.0}
+
+    def cls_for(code):
+        class Fake:
+            def __init__(self, **kw):
+                self.run_id = kw["run_id"]
+
+            async def run(self, routes, dates):
+                if code == "XP":
+                    with database.connection() as conn:
+                        conn.executemany(
+                            "INSERT INTO route_day_seen (run_id, origin, destination, day, price) VALUES (?,?,?,?,?)",
+                            [(self.run_id, "ILG", "TPA", d.isoformat(), price["v"]) for d in days])
+                return ScrapeReport(attempted=1, succeeded=1)
+        return Fake
+
+    monkeypatch.setattr(config, "OFFLINE", True)
+    monkeypatch.setattr(run_scraper, "scraper_class", cls_for)
+    monkeypatch.setattr(frontier, "refresh_catalog", lambda origins, **_k: 0)
+    monkeypatch.setattr(alerts, "deliver", lambda pushes: alerts.Delivery(pushed=len(pushes)))
+    database.init_db()
+    database.upsert_catalog("F9", [("PHL", "MCO"), ("MCO", "PHL")], "route-page")
+    args = ["--airlines", "XP,F9", "--origins", "ILG,PHL", "--destinations", "MCO,TPA", "--days", "10"]
+    assert run_scraper.main(args) == 0
+    price["v"] = 60.0                                                     # a 40% sale on every day
+    assert run_scraper.main(args) == 0
+    runs = database.last_runs(2)
+    assert [r["airline"] for r in runs] == ["F9", "XP"]
+    assert database.latest_run_ids() == [runs[0]["run_id"], runs[1]["run_id"]]
+    latest = database.list_events(limit=1000, run_ids=database.latest_run_ids())
+    assert any(e["kind"] == "sale_wave" and e["run_id"] == runs[1]["run_id"] for e in latest)
+
+
+# ---- --routes with several airlines: each airline gets only the routes it could fly ----
+def test_can_fly():
+    assert run_scraper.can_fly("XP", ("ILG", "TPA")) and run_scraper.can_fly("XP", ("MCO", "PHL"))
+    assert not run_scraper.can_fly("XP", ("PHL", "DEN"))                  # Denver is not an Avelo destination
+    assert run_scraper.can_fly("F9", ("PHL", "DEN")) and run_scraper.can_fly("F9", ("MCO", "BWI"))
+    assert run_scraper.can_fly("F9", ("PHL", "XYZ"))                      # off-catalog Frontier route stays allowed
+    assert not run_scraper.can_fly("F9", ("ILG", "TPA"))                  # Frontier does not fly from Wilmington
+
+
+def test_routes_flag_with_several_airlines_is_split_per_airline(isolated, monkeypatch):
+    calls = []
+    _two_airlines(monkeypatch, {}, calls)
+    code = run_scraper.main(["--airlines", "XP,F9", "--routes", "ILG-TPA,PHL-DEN,phl-mco", "--days", "3", "--no-alerts"])
+    assert code == 0
+    assert calls == [("XP", [("ILG", "TPA"), ("PHL", "MCO")]), ("F9", [("PHL", "DEN"), ("PHL", "MCO")])]
+    runs = {r["airline"]: r for r in database.last_runs(5)}
+    assert runs["XP"]["routes"] == ["ILG-TPA", "PHL-MCO"] and runs["F9"]["routes"] == ["PHL-DEN", "PHL-MCO"]
+
+
+def test_routes_flag_avelo_only_route_skips_frontier_instead_of_failing_it(isolated, monkeypatch):
+    calls = []
+    _two_airlines(monkeypatch, {"F9": RuntimeError("Frontier must not be sent to ILG-TPA")}, calls)
+    assert run_scraper.main(["--airlines", "XP,F9", "--routes", "ILG-TPA", "--days", "3", "--no-alerts"]) == 0
+    assert calls == [("XP", [("ILG", "TPA")])]
+    assert [r["airline"] for r in database.last_runs(5)] == ["XP"]
+
+
+def test_routes_flag_with_one_airline_is_taken_as_given(isolated, monkeypatch):
+    calls = []
+    _two_airlines(monkeypatch, {}, calls)
+    assert run_scraper.main(["--airlines", "F9", "--routes", "ILG-TPA", "--days", "3", "--no-alerts"]) == 0
+    assert run_scraper.main(["--routes", "PHL-DEN", "--days", "3", "--no-alerts"]) == 0
+    assert calls == [("F9", [("ILG", "TPA")]), ("XP", [("PHL", "DEN")])]

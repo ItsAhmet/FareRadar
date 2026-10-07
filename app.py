@@ -116,12 +116,9 @@ def load_drives(query: str, airports: tuple[str, ...]) -> dict[str, tuple[float,
 
 @st.cache_data(show_spinner=False)
 def load_signal_map(_version: float) -> dict[tuple[str, str, str], set[str]]:
-    """(origin, destination, day) → signal kinds from the most recent run."""
-    runs = database.last_runs(1)
-    if not runs:
-        return {}
+    """(origin, destination, day) → signal kinds from the most recent run of each airline."""
     out: dict[tuple[str, str, str], set[str]] = {}
-    for e in database.list_events(limit=1000, run_id=runs[0]["run_id"]):
+    for e in database.list_events(limit=1000, run_ids=database.latest_run_ids()):
         if e["origin"] and e["destination"] and e["day"]:
             out.setdefault((e["origin"], e["destination"], e["day"]), set()).add(e["kind"])
     return out
@@ -727,9 +724,9 @@ def alerts_tab() -> None:
         st.write(f"{marker}**{e['created_at'][:16].replace('T', ' ')}** · {e['message']}")
 
     st.subheader("Signals from the latest run")
-    runs = database.last_runs(1)
-    latest = database.list_events(limit=40, run_id=runs[0]["run_id"]) if runs else []
-    latest = [e for e in latest if e["kind"] in SIGNAL_ICONS]
+    # one scrape = one run row per airline, so "the latest run" is each airline's newest run
+    latest = database.list_events(limit=1000, run_ids=database.latest_run_ids())
+    latest = [e for e in latest if e["kind"] in SIGNAL_ICONS][:40]
     if latest:
         st.dataframe(
             pd.DataFrame([{"Kind": SIGNAL_ICONS[e["kind"]], "Route": f"{e['origin']}→{e['destination']}", "Day": e["day"], "Detail": e["message"]} for e in latest]),

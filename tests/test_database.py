@@ -532,3 +532,28 @@ def test_search_created_catalog_row_is_not_a_listing(conn):
     assert db.catalog_checked("F9", "PHL", conn) == t0
     assert db.catalog_routes("F9", origins=["PHL"], conn=conn, now=t0) == [("PHL", "MCO")]
     assert db.route_nonstop("F9", "PHL", "MCO", conn, now=t0) is True
+
+
+def test_latest_run_ids_is_the_newest_run_of_each_airline_and_events_can_span_them(conn):
+    from signals import Event
+
+    assert db.latest_run_ids(conn) == [] and db.list_events(run_ids=[], conn=conn) == []
+    old_xp = db.start_run("calendar", [("ILG", "TPA")], conn=conn)
+    xp = db.start_run("calendar", [("ILG", "TPA")], conn=conn)
+    f9 = db.start_run("calendar", [("PHL", "MCO")], conn=conn, airline="F9")
+    for run, text in ((old_xp, "old"), (xp, "avelo"), (f9, "frontier")):
+        db.add_events(run, [Event("sale_wave", "ILG", "TPA", date(2026, 11, 1), text)], conn)
+    assert db.latest_run_ids(conn) == [f9, xp]
+    assert [e["message"] for e in db.list_events(run_ids=db.latest_run_ids(conn), conn=conn)] == ["frontier", "avelo"]
+    assert [e["message"] for e in db.list_events(run_id=old_xp, conn=conn)] == ["old"]   # single-run filter unchanged
+
+
+def test_annotate_run_merges_into_the_summary_only(conn):
+    run = db.start_run("calendar", [("ILG", "TPA")], conn=conn)
+    db.finish_run(run, {"flights_written": 3}, conn, status="partial")
+    before = db.last_runs(1, conn)[0]
+    db.annotate_run(run, {"alerts": {"pushed": 1}}, conn)
+    after = db.last_runs(1, conn)[0]
+    assert after["summary"] == {"flights_written": 3, "alerts": {"pushed": 1}}
+    assert (after["status"], after["finished_at"]) == (before["status"], before["finished_at"])
+    db.annotate_run(999, {"x": 1}, conn)  # unknown run: no error, nothing written
