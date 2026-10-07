@@ -55,7 +55,7 @@ from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 
 import config
-import database
+import persist
 from models import Flight
 
 log = logging.getLogger(__name__)
@@ -350,17 +350,13 @@ class AveloScraper:
                     if self.mode in ("calendar", "full"):
                         report.attempted += 1
                         try:
-                            flights = await self._retry(self.scrape_lowfare_route, f"{origin}-{dest}-calendar", origin, dest, days)
+                            flights, covered = await self._retry(self.scrape_lowfare_route, f"{origin}-{dest}-calendar", origin, dest, days)
                             flights = [self._tag(f) for f in flights if f.departure_date in wanted]
-                            report.flights_written += database.upsert_flights(flights)
-                            if self.run_id is not None:
-                                database.record_seen(self.run_id, origin, dest, days, flights)
-                            shadowed = database.drop_shadowed_placeholders(origin, dest)
-                            if shadowed:
-                                log.debug("%s→%s: dropped %d calendar rows shadowed by detail rows", origin, dest, shadowed)
+                            covered = [d for d in covered if d in wanted]
+                            report.flights_written += persist.save_calendar(self.run_id, origin, dest, covered, flights)
                             report.succeeded += 1
                             await self._save_state()
-                            log.info("%s→%s calendar: %d fares", origin, dest, len(flights))
+                            log.info("%s→%s calendar: %d fares over %d days", origin, dest, len(flights), len(covered))
                         except Exception as exc:  # noqa: BLE001 - keep the loop alive
                             report.fail(f"{origin}-{dest} calendar: {exc}")
                         await self._polite_delay()
@@ -369,12 +365,13 @@ class AveloScraper:
                         for day in days:
                             report.attempted += 1
                             try:
-                                flights = await self._retry(self.scrape_day, f"{origin}-{dest}-{day}", origin, dest, day)
-                                database.delete_day(origin, dest, day, flight_id_prefix=LOWFARE_PREFIX)
+                                try:
+                                    flights = await self._retry(self.scrape_day, f"{origin}-{dest}-{day}", origin, dest, day)
+                                except DateUnavailable:
+                                    log.info("%s→%s %s: not selectable (sold out)", origin, dest, day)
+                                    flights = []
                                 flights = [self._tag(f) for f in flights]
-                                report.flights_written += database.upsert_flights(flights)
-                                if self.run_id is not None:
-                                    database.record_seen(self.run_id, origin, dest, [day], flights)
+                                report.flights_written += persist.save_day(self.run_id, origin, dest, day, flights)
                                 report.succeeded += 1
                                 await self._save_state()
                                 log.info("%s→%s %s: %d flight(s)", origin, dest, day, len(flights))
@@ -465,6 +462,8 @@ class AveloScraper:
         for attempt in range(self.max_retries + 1):
             try:
                 return await fn(*args)
+            except DateUnavailable:
+                raise  # a sold-out day is an answer, not a failure: don't retry it
             except (PlaywrightTimeout, ScrapeError) as exc:
                 await self._snapshot(tag, attempt)
                 if attempt >= self.max_retries:
@@ -652,7 +651,7 @@ class AveloScraper:
 
     # ---- results pages ---------------------------------------------------- #
 
-    async def scrape_lowfare_route(self, origin: str, dest: str, days: list[date]) -> list[Flight]:
+    async def scrape_lowfare_route(self, origin: str, dest: str, days: list[date]) -> tuple[list[Flight], list[date]]:
         """Low Fare Calendar for a route: every month that `days` touches."""
         page = self.page
         # The form needs *a* flight day to submit; if the picker offers no cell for the first, try the next.
@@ -670,6 +669,7 @@ class AveloScraper:
         await page.wait_for_selector(SEL["lowfare_day"])
 
         flights: list[Flight] = []
+        covered: list[date] = []
         for month in sorted({date(d.year, d.month, 1) for d in days}):
             month_cells = f"td.day[aria-label^='{month:%B}, ']"
             if not await page.locator(month_cells).count():
@@ -682,11 +682,18 @@ class AveloScraper:
                 await page.wait_for_timeout(400)
             parsed = parse_lowfare_calendar(await page.content(), origin, dest)
             in_month = [f for f in parsed if (f.departure_date.year, f.departure_date.month) == (month.year, month.month)]
-            flights.extend(in_month)
+            if in_month:
+                flights.extend(in_month)
+                covered.extend(d for d in days if (d.year, d.month) == (month.year, month.month))
+            else:
+                # Rendered but nothing parsed (fares arrived late, markup drift): that is not
+                # "sold out", so the month stays uncovered and its stored fares are left alone.
+                log.warning("%s→%s: month %s rendered but no fares parsed; leaving its stored fares untouched",
+                            origin, dest, f"{month:%b %Y}")
             await self._polite_delay(short=True)
         if not flights:
             raise ScrapeError("calendar rendered but no fares parsed (selectors may have changed)")
-        return flights
+        return flights, covered
 
     async def scrape_day(self, origin: str, dest: str, day: date) -> list[Flight]:
         """Standard search for one day: every flight card with times and fare."""

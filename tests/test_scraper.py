@@ -1,6 +1,7 @@
 """Parser tests against HTML/JSON captured from the live Avelo site (Sep 2026)."""
 import asyncio
 import json
+import logging
 import re
 from datetime import date, datetime
 from pathlib import Path
@@ -357,3 +358,133 @@ def test_scrape_day_in_a_real_browser(monkeypatch):
     assert isinstance(sold_out, DateUnavailable)
     assert isinstance(stuck, PlaywrightTimeout)  # neither cards nor message: a failure to retry, never a sold-out answer
     assert len(late_cards) == 1
+
+
+def test_retry_does_not_retry_a_sold_out_day():
+    s = AveloScraper(screenshots=False, max_retries=2)
+    calls = []
+
+    async def sold_out():
+        calls.append(1)
+        raise DateUnavailable("Oct 12 not selectable")
+
+    with pytest.raises(DateUnavailable):
+        asyncio.run(s._retry(sold_out, "t"))
+    assert len(calls) == 1
+
+
+def test_retry_still_retries_other_scrape_errors(monkeypatch):
+    s = AveloScraper(screenshots=False, max_retries=1)
+    calls = []
+
+    async def flaky():
+        calls.append(1)
+        if len(calls) == 1:
+            raise ScrapeError("selector timeout")
+        return "ok"
+
+    async def no_sleep(_):
+        return None
+
+    async def no_page(*_a, **_k):
+        return None
+
+    monkeypatch.setattr("scraper.asyncio.sleep", no_sleep)
+    monkeypatch.setattr(s, "_new_page", no_page)
+    monkeypatch.setattr(AveloScraper, "page", property(lambda self: type("P", (), {"context": type("C", (), {"browser": None})()})()))
+    assert asyncio.run(s._retry(flaky, "t")) == "ok" and len(calls) == 2
+
+
+def _month_grid(month_name, cells):
+    """A month grid. (day, price) is a selectable cell; (day, None) is a disabled cell with the same aria-label."""
+    html = []
+    for day, price in cells:
+        label = f'aria-label="{month_name}, {day:02d} 2026"'
+        if price is None:
+            html.append(f'<td class="day disabled" {label}></td>')
+        else:
+            html.append(f'<td class="day selectable" {label}><div class="price subscription">${price}</div></td>')
+    return "<table>" + "".join(html) + "</table>"
+
+
+class FakeCalendarPage:
+    """Just enough of a Playwright page to walk the Low Fare Calendar's month tabs."""
+
+    def __init__(self, months, current):
+        self.months, self.current = months, current  # {"10-2026": html}
+
+    async def wait_for_url(self, *_a, **_k):
+        return None
+
+    async def wait_for_selector(self, *_a, **_k):
+        return None
+
+    async def wait_for_timeout(self, *_a, **_k):
+        return None
+
+    async def content(self):
+        return self.months[self.current]
+
+    def locator(self, selector):
+        page = self
+        cells = re.match(r"td\.day\[aria-label\^='(\w+), '\]", selector)
+        tab = re.match(r"div\.month\[id='([\d-]+)'\]", selector)
+
+        class Locator:
+            async def count(self):
+                if cells:
+                    return page.months[page.current].count(f'aria-label="{cells.group(1)}, ')
+                return int(tab.group(1) in page.months)
+
+            async def click(self):
+                page.current = tab.group(1)
+
+        return Locator()
+
+
+# October prices Oct 9 and has Oct 12 without a fare (sold out). November renders only disabled cells, as when its
+# fares arrive after the 400 ms pause or the selectors drift: the cells exist, but nothing parses.
+CAL_DAYS = [date(2026, 10, 9), date(2026, 10, 12), date(2026, 11, 5), date(2026, 11, 8)]
+CAL_MONTHS = {
+    "10-2026": _month_grid("October", [(9, 79), (12, None)]),
+    "11-2026": _month_grid("November", [(5, None), (8, None)]),
+}
+
+
+def _calendar_scraper(monkeypatch):
+    s = AveloScraper(screenshots=False)
+
+    async def noop(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(s, "_submit_search", noop)
+    monkeypatch.setattr(s, "_polite_delay", noop)
+    s._page = FakeCalendarPage(dict(CAL_MONTHS), current="10-2026")
+    return s
+
+
+def test_calendar_month_that_renders_without_fares_is_not_covered(monkeypatch, caplog):
+    s = _calendar_scraper(monkeypatch)
+    with caplog.at_level(logging.WARNING, logger="scraper"):
+        flights, covered = asyncio.run(s.scrape_lowfare_route("ILG", "TPA", CAL_DAYS))
+    assert [f.departure_date for f in flights] == [date(2026, 10, 9)]
+    assert covered == [date(2026, 10, 9), date(2026, 10, 12)]  # Oct 12 had no fare (sold out); November is not covered
+    assert "Nov 2026" in caplog.text and "no fares parsed" in caplog.text
+
+
+def test_empty_calendar_month_leaves_stored_rows_and_sightings_untouched(monkeypatch):
+    conn = db.get_connection(":memory:")
+    timed = Flight(origin="ILG", destination="TPA", departure_datetime=datetime(2026, 11, 5, 9), price=70,
+                   duration_minutes=150, flight_id="AVELO-ILG-TPA")
+    db.upsert_flights([timed], conn)
+    run1 = db.start_run("detail", [("ILG", "TPA")], conn=conn)
+    db.record_seen(run1, "ILG", "TPA", [date(2026, 11, 5)], [timed], conn)
+
+    run2 = db.start_run("calendar", [("ILG", "TPA")], conn=conn)
+    flights, covered = asyncio.run(_calendar_scraper(monkeypatch).scrape_lowfare_route("ILG", "TPA", CAL_DAYS))
+    persist.save_calendar(run2, "ILG", "TPA", covered, flights, conn)
+
+    assert db.find_trip("XP|ILG|TPA|2026-11-05|09:00", conn).price == 70  # a pinned timed fare survives the empty month
+    assert db.seen_in_run(run1, "ILG", "TPA", conn) == {date(2026, 11, 5): 70}
+    assert db.seen_in_run(run2, "ILG", "TPA", conn) == {date(2026, 10, 9): 79, date(2026, 10, 12): None}  # no Nov 5 sold-out row
+    conn.close()
