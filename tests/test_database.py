@@ -572,3 +572,31 @@ def test_tests_cannot_open_the_owners_database(_no_real_database, tmp_path, monk
     db.init_db()                                    # a test database and :memory: still open
     db.get_connection(":memory:").close()
     assert _no_real_database == []
+
+
+def test_pytest_is_rooted_at_the_project_so_the_database_guard_always_loads(request):
+    """pytest.ini pins rootdir; without it the root conftest.py is skipped from tests/ or a scratch dir."""
+    assert request.config.rootpath == config.PROJECT_ROOT
+    assert request.config.inipath == config.PROJECT_ROOT / "pytest.ini"
+    plugins = request.config.pluginmanager
+    assert plugins.has_plugin(str(config.PROJECT_ROOT / "conftest.py"))
+
+
+@pytest.mark.parametrize("start", ["tests", "elsewhere"])
+def test_database_guard_is_loaded_when_pytest_starts_outside_the_project_root(start, tmp_path):
+    """The guard tests must pass (not error with "fixture '_no_real_database' not found") from any cwd."""
+    import subprocess
+    import sys
+
+    tests_dir = config.PROJECT_ROOT / "tests"
+    if start == "tests":
+        cwd, targets = tests_dir, ["test_database.py", "test_frontier.py"]
+    else:
+        cwd, targets = tmp_path, [str(tests_dir / "test_database.py"), str(tests_dir / "test_frontier.py")]
+    done = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "--color=no", *targets, "-k",
+         "test_tests_cannot_open_the_owners_database or test_scraper_helper_without_a_test_database"],
+        cwd=cwd, capture_output=True, text=True, timeout=120,
+    )
+    assert done.returncode == 0, done.stdout[-2000:] + done.stderr[-2000:]
+    assert "2 passed" in done.stdout and "error" not in done.stdout.lower()

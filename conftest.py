@@ -4,6 +4,9 @@ It lives at the project root (not in tests/) so it also covers scratch and probe
 elsewhere in the tree, e.g. under .superpowers/. A test helper that reaches database.py
 without first pointing database.DB_PATH at a tmp path would otherwise migrate and write
 data/flights.db: get_connection() migrates on open.
+
+pytest only loads this file when its rootdir is the project root. pytest.ini pins that for any
+working directory or argument inside the project tree; keep the two files together.
 """
 from pathlib import Path
 
