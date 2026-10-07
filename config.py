@@ -55,7 +55,8 @@ HOME_AIRPORT_INFO: dict[str, Airport] = {
     )
 }
 
-# Parking defaults are estimates the owner can change in the dashboard (settings table).
+# Parking defaults are estimates. Overrides live in the settings table (database.set_home_cost);
+# Phase 1 has no dashboard control for them yet.
 DEFAULT_HOME_COSTS: dict[str, HomeCost] = {
     "ILG": HomeCost(None, 0.0),
     "PHL": HomeCost(None, 17.0),

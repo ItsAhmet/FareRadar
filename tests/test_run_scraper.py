@@ -109,3 +109,51 @@ def test_mock_run_records_sightings_only_for_primary_home_routes(isolated):
     assert run_scraper.main(["--mock", "--destinations", "TPA", "--days", "7", "--no-alerts", "--origins", origins]) == 0
     run_id = database.last_runs(1)[0]["run_id"]
     assert set(database.routes_in_run(run_id)) == {(config.PRIMARY_HOME, "TPA"), ("TPA", config.PRIMARY_HOME)}
+
+
+def _fake_live_scraper(monkeypatch, failed, succeeded):
+    """Stand in for scraper.AveloScraper (imported lazily by run_scraper) with a report of the given shape."""
+    import sys
+    import types
+
+    class Report:
+        flights_written = 0
+        attempted = failed + succeeded
+        skipped_routes: list = []
+        failures = ["x"] * failed
+
+    Report.failed, Report.succeeded = failed, succeeded
+
+    class FakeScraper:
+        def __init__(self, *_a, **_k):
+            pass
+
+        async def run(self, routes, dates):
+            return Report()
+
+    module = types.ModuleType("scraper")
+    module.AveloScraper = FakeScraper
+    monkeypatch.setitem(sys.modules, "scraper", module)
+
+
+@pytest.mark.parametrize("failed,succeeded,status,allow_sold_out", [
+    (0, 3, "ok", True),
+    (1, 2, "partial", False),
+    (2, 0, "failed", False),
+])
+def test_live_run_status_decides_whether_sold_out_can_fire(isolated, monkeypatch, failed, succeeded, status, allow_sold_out):
+    """Spec §4: partial or failed runs never produce sold_out events. The run's status comes from the report, and
+    only an ok run lets signal detection report a day as no longer bookable."""
+    import signals
+
+    calls = []
+    monkeypatch.setattr(signals, "run_detection",
+                        lambda run_id, conn=None, allow_sold_out=True: calls.append(allow_sold_out) or [])
+    monkeypatch.setattr(run_scraper.alerts, "evaluate_and_deliver", lambda *_a, **_k: {})
+    _fake_live_scraper(monkeypatch, failed, succeeded)
+
+    code = run_scraper.main(["--destinations", "TPA", "--days", "2", "--origins", "ILG"])
+
+    assert database.last_runs(1)[0]["status"] == status
+    assert calls == [allow_sold_out]
+    assert code == (0 if status == "ok" else 1)

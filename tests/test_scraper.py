@@ -481,6 +481,7 @@ CAL_MONTHS = {
 
 
 def _calendar_scraper(monkeypatch):
+    monkeypatch.setattr("scraper.local_today", lambda: date(2026, 10, 1))  # CAL_DAYS stay in the future
     s = AveloScraper(screenshots=False)
 
     async def noop(*_a, **_k):
@@ -517,3 +518,179 @@ def test_empty_calendar_month_leaves_stored_rows_and_sightings_untouched(monkeyp
     assert db.seen_in_run(run1, "ILG", "TPA", conn) == {date(2026, 11, 5): 70}
     assert db.seen_in_run(run2, "ILG", "TPA", conn) == {date(2026, 10, 9): 79, date(2026, 10, 12): None}  # no Nov 5 sold-out row
     conn.close()
+
+
+# --------------------------------------------------------------------------- #
+# AveloScraper.run itself: the wiring between the scrape and persist
+# --------------------------------------------------------------------------- #
+
+
+class _FakePlaywright:
+    """`async with async_playwright() as pw: await pw.chromium.launch(...)` with nothing behind it."""
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return False
+
+    @property
+    def chromium(self):
+        return self
+
+    async def launch(self, **_k):
+        class Browser:
+            async def close(self):
+                return None
+
+        return Browser()
+
+
+def _run_scraper(monkeypatch, tmp_path, *, mode, schedule, today, page=None, scrape_day=None):
+    """An AveloScraper whose run() goes through its real loop against a temp database, with no browser."""
+    import scraper as scraper_module
+
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "f.db")
+    db.init_db()
+    monkeypatch.setattr(scraper_module, "async_playwright", lambda: _FakePlaywright())
+    monkeypatch.setattr(scraper_module, "local_today", lambda: today)
+    s = AveloScraper(screenshots=False, mode=mode, max_retries=0)
+
+    async def noop(*_a, **_k):
+        return None
+
+    async def fetch_schedule():
+        return schedule
+
+    for name in ("_new_page", "_save_state", "_polite_delay", "_submit_search"):
+        monkeypatch.setattr(s, name, noop)
+    monkeypatch.setattr(s, "fetch_schedule", fetch_schedule)
+    if scrape_day is not None:
+        monkeypatch.setattr(s, "scrape_day", scrape_day)
+    s._page = page
+    return s
+
+
+def test_local_today_is_the_calendar_date():
+    from scraper import local_today
+
+    assert local_today() == date.today()
+
+
+def test_scrape_lowfare_route_never_covers_todays_disabled_cell(monkeypatch):
+    """The captured page renders today (Sep 2 2026) as `td.day.today.disabled`: not covered, so never cleared."""
+    monkeypatch.setattr("scraper.local_today", lambda: date(2026, 9, 2))
+    s = AveloScraper(screenshots=False)
+
+    async def noop(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(s, "_submit_search", noop)
+    monkeypatch.setattr(s, "_polite_delay", noop)
+    s._page = FakeCalendarPage({"09-2026": (FIXTURES / "lowfare_page.html").read_text()}, current="09-2026")
+    days = [date(2026, 9, d) for d in range(1, 10)]
+    flights, covered = asyncio.run(s.scrape_lowfare_route("ILG", "TPA", days))
+    assert covered == days[2:]  # Sep 1 (past) and Sep 2 (today) are left out; Sep 8 (disabled, future) is covered
+    assert date(2026, 9, 2) not in {f.departure_date for f in flights}
+
+
+def test_answerable_days_leave_out_today_and_the_past():
+    from scraper import answerable_days
+
+    today = date(2026, 9, 2)
+    days = [date(2026, 9, 1), today, date(2026, 9, 3), date(2026, 9, 9)]
+    assert answerable_days(days, days[:3], today) == [date(2026, 9, 3)]
+
+
+def test_unscheduled_days_lists_future_requested_days_the_schedule_dropped():
+    from scraper import unscheduled_days
+
+    today = date(2026, 10, 8)
+    wanted = [date(2026, 10, d) for d in range(8, 13)]
+    schedule = {("ILG", "TPA"): {date(2026, 10, 8), date(2026, 10, 9), date(2026, 10, 12)}}
+    assert unscheduled_days([("ilg", "tpa"), ("ILG", "LAL")], wanted, schedule, today) == {
+        ("ILG", "TPA"): [date(2026, 10, 10), date(2026, 10, 11)],  # today (Oct 8) is never listed
+        ("ILG", "LAL"): [date(2026, 10, d) for d in range(9, 13)],  # a route the schedule dropped entirely
+    }
+
+
+def test_nightly_calendar_on_the_day_of_travel_keeps_todays_fares_and_raises_no_alerts(monkeypatch, tmp_path):
+    """The captured calendar renders today (Sep 2 2026) as `td.day.today.disabled` with no fare. That is not a
+    sold-out answer: today's timed fare stays, no sold_out event is raised and the watched package still resolves."""
+    import alerts
+    import signals
+    from optimizer import GetawayQuery, Window, find_itineraries
+
+    today = date(2026, 9, 2)
+    html = (FIXTURES / "lowfare_page.html").read_text()
+    days = [date(2026, 9, d) for d in range(2, 12)]
+    s = _run_scraper(monkeypatch, tmp_path, mode="calendar", today=today,
+                     schedule={("ILG", "TPA"): set(days)}, page=FakeCalendarPage({"09-2026": html}, current="09-2026"))
+    out = Flight("ILG", "TPA", datetime(2026, 9, 2, 19), 59, duration_minutes=150, flight_id="AVELO-ILG-TPA")
+    back = Flight("TPA", "ILG", datetime(2026, 9, 5, 12), 69, duration_minutes=150, flight_id="AVELO-TPA-ILG")
+    db.upsert_flights([out, back])
+    r1 = db.start_run("full", [("ILG", "TPA")])
+    db.record_seen(r1, "ILG", "TPA", days, parse_lowfare_calendar(html, "ILG", "TPA") + [out])
+    db.finish_run(r1, {}, status="ok")
+    window = Window(datetime(2026, 9, 2, 12), datetime(2026, 9, 6, 23))
+    alerts.watch_package(find_itineraries(GetawayQuery({"TPA"}, [window], origins=["ILG"], min_nights=1))[0])
+    alerts.evaluate_packages()
+
+    r2 = db.start_run("calendar", [("ILG", "TPA")])
+    s.run_id = r2
+    report = asyncio.run(s.run([("ILG", "TPA")], days))
+
+    assert report.failed == 0 and report.succeeded == 1
+    assert [(f.departure_datetime, f.price) for f in db.query_flights(["ILG"], ["TPA"], today, today)] == [
+        (datetime(2026, 9, 2, 19), 59)]
+    seen = db.seen_in_run(r2, "ILG", "TPA")
+    assert today not in seen and seen[date(2026, 9, 3)] == 178 and seen[date(2026, 9, 8)] is None
+    events = signals.run_detection(r2, allow_sold_out=True) + alerts.evaluate_packages()
+    assert not [e for e in events if e.kind in ("sold_out", "watch_unavailable") and e.day == today]
+    assert not [e for e in events if e.kind == "watch_unavailable"]
+
+
+def test_detail_run_clears_a_sold_out_future_day_but_skips_today(monkeypatch, tmp_path):
+    today = date(2026, 10, 8)
+    later = date(2026, 10, 10)
+
+    async def scrape_day(origin, dest, day):
+        raise DateUnavailable(f"{origin}→{dest} {day}: no flights available")
+
+    s = _run_scraper(monkeypatch, tmp_path, mode="detail", today=today,
+                     schedule={("ILG", "TPA"): {today, later}}, scrape_day=scrape_day)
+    stored = [Flight("ILG", "TPA", datetime(2026, 10, 8, 19), 59, duration_minutes=150, flight_id="AVELO-ILG-TPA"),
+              Flight("ILG", "TPA", datetime(2026, 10, 10, 9), 79, duration_minutes=150, flight_id="AVELO-ILG-TPA")]
+    db.upsert_flights(stored)
+    s.run_id = db.start_run("detail", [("ILG", "TPA")])
+
+    report = asyncio.run(s.run([("ILG", "TPA")], [today, later]))
+
+    assert report.failed == 0 and report.succeeded == 2
+    left = db.query_flights(["ILG"], ["TPA"], today, later)
+    assert [f.departure_datetime for f in left] == [datetime(2026, 10, 8, 19)]  # today's fare kept, Oct 10 cleared
+    assert db.seen_in_run(s.run_id, "ILG", "TPA") == {later: None}  # no sighting for today
+
+
+def test_run_clears_fares_on_days_and_routes_the_schedule_no_longer_lists(monkeypatch, tmp_path):
+    """routes/all dropped Oct 10 (a frequency cut) and ILG-LAL entirely: their stored fares go, without a sold-out
+    sighting, while scheduled days are still searched normally."""
+    today = date(2026, 10, 7)
+    wanted = [date(2026, 10, d) for d in range(9, 14)]
+    page = FakeCalendarPage({"10-2026": _month_grid("October", [(9, 79), (10, None), (12, 89)])}, current="10-2026")
+    s = _run_scraper(monkeypatch, tmp_path, mode="calendar", today=today, page=page,
+                     schedule={("ILG", "TPA"): {date(2026, 10, 9), date(2026, 10, 12)}})
+    lowfare = lambda o, d, day, p: Flight(o, d, datetime(2026, 10, day), p, flight_id=f"LOWFARE-{o}-{d}")  # noqa: E731
+    db.upsert_flights([lowfare("ILG", "TPA", 9, 79), lowfare("ILG", "TPA", 10, 59), lowfare("ILG", "TPA", 12, 89),
+                       lowfare("ILG", "LAL", 11, 49), lowfare("ILG", "LAL", 20, 49)])
+    s.run_id = db.start_run("calendar", [("ILG", "TPA"), ("ILG", "LAL")])
+
+    report = asyncio.run(s.run([("ILG", "TPA"), ("ILG", "LAL")], wanted))
+
+    assert report.skipped_routes == ["ILG-LAL"]
+    tpa = {f.departure_date: f.price for f in db.query_flights(["ILG"], ["TPA"], wanted[0], wanted[-1])}
+    assert tpa == {date(2026, 10, 9): 79, date(2026, 10, 12): 89}
+    lal = [f.departure_date for f in db.query_flights(["ILG"], ["LAL"], date(2026, 10, 1), date(2026, 10, 31))]
+    assert lal == [date(2026, 10, 20)]  # Oct 11 was requested and is gone; Oct 20 was not requested and stays
+    assert db.seen_in_run(s.run_id, "ILG", "TPA") == {date(2026, 10, 9): 79, date(2026, 10, 12): 89}
+    assert db.seen_in_run(s.run_id, "ILG", "LAL") == {}

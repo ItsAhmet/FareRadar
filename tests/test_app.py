@@ -218,3 +218,15 @@ def test_packages_from_a_second_home_airport_show_up(mock_db, monkeypatch):
     assert tables and (tables[0]["Home"] == "PHL").any()
     phl = tables[0][tables[0]["Home"] == "PHL"]
     assert (phl["Home-side $"] > 0).all(), "PHL parking (default $17/day) must be counted"
+
+
+def test_packages_table_explains_door_to_door_and_home_side_costs(mock_db):
+    import json
+
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    assert not at.exception
+    table = next(d for d in at.dataframe if "Add-on Fees" in d.value.columns)  # the packages table
+    columns = json.loads(table.proto.columns)
+    door, home = columns["Door-to-door"]["help"], columns["Home-side $"]["help"]
+    assert "Home-side" in door and "parking" in door
+    assert "Parking" in home and "PHL $17" in home and "no dashboard control" in home

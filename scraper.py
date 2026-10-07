@@ -292,6 +292,47 @@ def plan_targets(
     return targets, skipped
 
 
+def local_today() -> date:
+    """Today on the machine running the scrape (the owner's Mac, America/New_York). Tests replace it."""
+    return date.today()
+
+
+def answerable_days(days: Iterable[date], wanted: Iterable[date], today: date) -> list[date]:
+    """The days a search can positively answer for: requested, and after today.
+
+    Avelo's Low Fare Calendar renders today as a disabled cell with no fare
+    (`td.day.today.disabled`) even while today's later flights are still
+    bookable, and a past day is never offered. Neither is "no fare": treating
+    it as one would delete today's stored fares and push sold-out and
+    watch-unavailable alerts on the morning of travel.
+    """
+    wanted = set(wanted)
+    return sorted(d for d in set(days) if d in wanted and d > today)
+
+
+def unscheduled_days(
+    routes: Iterable[tuple[str, str]],
+    dates: Iterable[date],
+    schedule: dict[tuple[str, str], set[date]],
+    today: date,
+) -> dict[tuple[str, str], list[date]]:
+    """Requested route-days after today that Avelo's schedule (routes/all) does not list.
+
+    The schedule is authoritative (an empty payload is a ScrapeError, never an
+    empty schedule), so a fare stored earlier on one of these days is a flight
+    Avelo no longer operates: the run deletes it instead of offering it until
+    it departs. Routes that `plan_targets` skips entirely are included.
+    """
+    future = {d for d in dates if d > today}
+    out: dict[tuple[str, str], list[date]] = {}
+    for origin, dest in routes:
+        key = (origin.upper(), dest.upper())
+        days = sorted(future - schedule.get(key, set()))
+        if days:
+            out[key] = days
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Browser driver
 # --------------------------------------------------------------------------- #
@@ -340,7 +381,11 @@ class AveloScraper:
                 if self.promo_code:
                     log.info("promo code %s will be applied to every search", self.promo_code)
                 schedule = await self._retry(self.fetch_schedule, "schedule")
+                today = local_today()
+                routes = list(routes)
                 targets, report.skipped_routes = plan_targets(routes, wanted, schedule)
+                for (origin, dest), gone in unscheduled_days(routes, wanted, schedule, today).items():
+                    persist.clear_unscheduled(origin, dest, gone)
                 for skipped in report.skipped_routes:
                     log.info("%s: no scheduled flights in range, skipping", skipped)
                 for target in targets:
@@ -352,7 +397,7 @@ class AveloScraper:
                         try:
                             flights, covered = await self._retry(self.scrape_lowfare_route, f"{origin}-{dest}-calendar", origin, dest, days)
                             flights = [self._tag(f) for f in flights if f.departure_date in wanted]
-                            covered = [d for d in covered if d in wanted]
+                            covered = answerable_days(covered, wanted, today)
                             report.flights_written += persist.save_calendar(self.run_id, origin, dest, covered, flights)
                             report.succeeded += 1
                             await self._save_state()
@@ -368,6 +413,13 @@ class AveloScraper:
                                 try:
                                     flights = await self._retry(self.scrape_day, f"{origin}-{dest}-{day}", origin, dest, day)
                                 except DateUnavailable:
+                                    if day <= today:
+                                        # Today (or a past day) not being offered is not a sold-out answer:
+                                        # keep its stored fares and record no sighting.
+                                        log.info("%s→%s %s: not offered any more today; stored fares kept", origin, dest, day)
+                                        report.succeeded += 1
+                                        await self._polite_delay()
+                                        continue
                                     log.info("%s→%s %s: not selectable (sold out)", origin, dest, day)
                                     flights = []
                                 flights = [self._tag(f) for f in flights]
@@ -658,7 +710,10 @@ class AveloScraper:
     # ---- results pages ---------------------------------------------------- #
 
     async def scrape_lowfare_route(self, origin: str, dest: str, days: list[date]) -> tuple[list[Flight], list[date]]:
-        """Low Fare Calendar for a route: every month that `days` touches."""
+        """Low Fare Calendar for a route: every month that `days` touches.
+
+        Returns the fares and the covered days: those of `days` after today in a month that parsed at least one fare.
+        """
         page = self.page
         # The form needs *a* flight day to submit; if the picker offers no cell for the first, try the next.
         last_error: Exception | None = None
@@ -699,7 +754,7 @@ class AveloScraper:
             await self._polite_delay(short=True)
         if not flights:
             raise ScrapeError("calendar rendered but no fares parsed (selectors may have changed)")
-        return flights, covered
+        return flights, answerable_days(covered, days, local_today())  # today's disabled cell is not "sold out"
 
     async def scrape_day(self, origin: str, dest: str, day: date) -> list[Flight]:
         """Standard search for one day: every flight card with times and fare."""

@@ -5,7 +5,12 @@ we stored earlier for a covered day that the search no longer shows is gone
 (sold out, retimed, cancelled) and is deleted, so packages, rules and watches
 never offer a fare that cannot be booked. Days the search did not cover (a
 month that failed to render, or rendered without one parsed fare) are left
-untouched and not recorded.
+untouched and not recorded. Today and past days are never covered: Avelo shows
+today as a disabled calendar cell even while its flights are bookable.
+
+Days Avelo's schedule (routes/all) no longer lists are cleared by
+`clear_unscheduled` without a sighting: nothing was searched, so they are not
+reported as sold out, but a fare Avelo does not fly is never offered.
 """
 from __future__ import annotations
 
@@ -49,3 +54,13 @@ def save_day(run_id: int | None, origin: str, dest: str, day: date, flights: lis
     if run_id is not None:
         database.record_seen(run_id, origin, dest, [day], flights, conn)
     return written
+
+
+def clear_unscheduled(origin: str, dest: str, days: Iterable[date], conn: sqlite3.Connection | None = None) -> int:
+    """Delete stored fares on route-days Avelo's schedule no longer lists. Records no sighting."""
+    days = sorted(set(days))
+    removed = database.delete_days(origin, dest, days, conn)
+    if removed:
+        log.info("%s→%s: %d stored fare(s) on days no longer in Avelo's schedule removed (%s..%s)",
+                 origin, dest, removed, days[0], days[-1])
+    return removed

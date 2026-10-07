@@ -873,8 +873,15 @@ def results_table(ranked: list[Itinerary], version: float = 0.0) -> None:
             "Sun Score": st.column_config.ProgressColumn("Sun", min_value=0, max_value=1, format="%.2f", help="Warm and dry over the trip days; blank beyond the 16-day forecast"),
             "Δ°F vs home": st.column_config.NumberColumn(format="%+.0f°F"),
             "Drive (min)": st.column_config.NumberColumn(format="%.0f"),
-            "Door-to-door": st.column_config.NumberColumn(format="$%d", help="Fares plus drive time at your $/hour"),
-            "Home-side $": st.column_config.NumberColumn(format="$%d"),
+            "Door-to-door": st.column_config.NumberColumn(
+                format="$%d",
+                help="Fares, plus your drive at the destination end and the Home-side $ (home-airport parking and "
+                     "drive), with drive time valued at your $/hour"),
+            "Home-side $": st.column_config.NumberColumn(
+                format="$%d",
+                help="Parking at the home airport you fly from (per night, at least one day) plus your drive from "
+                     "home to that airport and back at your $/hour. Default parking: ILG $0, PHL $17, BWI $14 a day; "
+                     "the home drive counts only once set. There is no dashboard control for these yet."),
             "Member Fare": st.column_config.CheckboxColumn(disabled=True),
             "Times Verified": st.column_config.CheckboxColumn(disabled=True),
         },

@@ -78,3 +78,19 @@ def test_partial_runs_raise_no_sold_out():
     assert [e.kind for e in events if e.kind == "sold_out"] == ["sold_out"]
     events, _ = detect_route("ILG", "TPA", prev, cur, None, allow_sold_out=False)
     assert not [e for e in events if e.kind == "sold_out"]
+
+
+def test_run_detection_passes_allow_sold_out_through():
+    conn = db.get_connection(":memory:")
+    d1, d2 = date(2026, 10, 9), date(2026, 10, 12)
+    fare = lambda d, p: Flight(origin="ILG", destination="TPA", departure_datetime=datetime(d.year, d.month, d.day),  # noqa: E731
+                               price=p, flight_id="LOWFARE-ILG-TPA")
+    r1 = db.start_run("calendar", [("ILG", "TPA")], conn=conn)
+    db.record_seen(r1, "ILG", "TPA", [d1, d2], [fare(d1, 79), fare(d2, 89)], conn)
+    db.finish_run(r1, {}, conn=conn)
+    r2 = db.start_run("calendar", [("ILG", "TPA")], conn=conn)
+    db.record_seen(r2, "ILG", "TPA", [d1, d2], [fare(d1, 79)], conn)  # Oct 12 seen without a fare
+
+    assert not [e for e in run_detection(r2, conn, allow_sold_out=False) if e.kind == "sold_out"]
+    assert [e.day for e in run_detection(r2, conn) if e.kind == "sold_out"] == [d2]  # the default still reports it
+    conn.close()

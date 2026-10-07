@@ -4,7 +4,8 @@ Personal getaway finder for Avelo Airlines nonstops from **Wilmington, DE (ILG)*
 Scrapes Avelo PLUS member fares into SQLite, builds mix-and-match weekend
 packages that fit a weekly free window, watches fares nightly, pushes alerts,
 and hands off to Avelo's site for booking. Single user (the owner is an Avelo
-PLUS member). Python 3.13, Streamlit, Playwright, SQLite. Not a git repo.
+PLUS member). Python 3.13, Streamlit, Playwright, SQLite. Git repo: `main` is the
+baseline, feature work goes on a branch (Phase 1 is on `phase1-multi-home`).
 
 ## Run / test
 
@@ -17,7 +18,7 @@ Desktop: iCloud "Optimize Mac Storage" evicted ~20k `.venv` files (`ls -lO` show
 ```bash
 cd ~/avelo-finder
 source .venv/bin/activate            # venv already built; playwright chromium installed
-pytest -q                            # 172 tests, no network; AppTest boots the dashboard
+pytest -q                            # 183 tests, no network; AppTest boots the dashboard
 streamlit run app.py                 # dashboard (nothing scrapes on load)
 python launch.py [--detach|--stop]   # start if needed + open browser; ~/Desktop/Avelo Finder.command calls it
 python run_scraper.py --destinations TPA,LAL --start 2026-10-01 --end 2026-10-14   # targeted live scrape
@@ -36,10 +37,10 @@ geocoding, routing, pushes); tests set `config.OFFLINE` via monkeypatch.
 |---|---|
 | `config.py` | home airports (`HOME_CODES` from `AVELO_HOME_AIRPORTS`, `PRIMARY_HOME` = first), 16 destinations with region + lat/lon, CSS selectors, thresholds, env settings |
 | `trips.py` | trip keys: `airline\|origin\|dest\|date\|time-or-*`; watches/rules/bookings store these |
-| `persist.py` | writes one search result; deletes fares that vanished from covered days |
+| `persist.py` | writes one search result; deletes fares that vanished from covered days (never today or past days) and fares on days `routes/all` no longer lists (`clear_unscheduled`) |
 | `runlock.py` | `data/scrape.lock`, one scrape at a time; `main()` exits 3 when held |
 | `models.py` | `Flight` frozen dataclass (price = member fare, `base_price` = public, `time_known`) |
-| `database.py` | SQLite schema + in-place migrations; flights, price_history, scrape_runs, route_day_seen, route_floor, events, watchlist, bookings, places, drive_times |
+| `database.py` | SQLite schema + in-place migrations; flights, price_history, scrape_runs (+ `status` ok/partial/failed; only finished `ok` runs, or legacy NULL-status ones, are signal baselines), route_day_seen, route_floor, events, watchlist, bookings, places, drive_times, settings (JSON key/value; `home_costs` = per-home-airport drive minutes + parking/day, via `set_home_cost`) |
 | `scraper.py` | Playwright driver for Avelo's form + **pure parsers** (`parse_schedule`, `parse_lowfare_calendar`, `parse_select_page`, `plan_targets`) |
 | `optimizer.py` | `Availability`/`Window`, `GetawayQuery`, `build_itineraries`, rankings (price/fit/sun/door-to-door), `enrich*`, `wildcard` |
 | `signals.py` | sale wave / sold out / floor detection between consecutive runs |
@@ -75,7 +76,9 @@ geocoding, routing, pushes); tests set `config.OFFLINE` via monkeypatch.
   `button.submit-button`.
 - Low Fare Calendar toggle → `/flight-search/lowfare`: `td.day.selectable[aria-label="September, 03 2026"]`
   with `.price.subscription` (Avelo PLUS) and `.price.standard`; month tabs `div.month[id='10-2026']`.
-  One page load per route covers months → `calendar` mode.
+  One page load per route covers months → `calendar` mode. **Today** renders as
+  `td.day.today.disabled` with no fare even while today's flights are bookable, so
+  today and past days are never treated as an answer (`scraper.answerable_days`).
 - Plain search → `/flight-search/select`: `button.flight-block-wrapper-v2` cards with
   `.scheduled-time` ×2, `.flight-block-duration`, `.fare.subscription/.standard .price`.
   **No flight numbers anywhere** → `flight_number` is always NULL; ids are `LOWFARE-ORG-DST` / `AVELO-ORG-DST`.
@@ -103,9 +106,15 @@ geocoding, routing, pushes); tests set `config.OFFLINE` via monkeypatch.
 - `database.py` functions take an optional `conn`; tests use `":memory:"`.
   Schema changes go in `SCHEMA` (new tables) or `MIGRATIONS` (new columns).
 - Calendar rows are stored at 00:00 with `time_known=False`; the optimizer
-  matches them by date and flags packages `time_verified=False`. Detail runs
-  replace them (`delete_day(..., flight_id_prefix="LOWFARE")`), and calendar
-  runs drop placeholders shadowed by detail rows.
+  matches them by date and flags packages `time_verified=False`. All writes go
+  through `persist.py`: a detail result (`save_day`) deletes **every** stored row
+  for that day (placeholders and timed rows) before writing; a calendar result
+  (`save_calendar`) clears covered days that came back without a fare and drops
+  placeholders shadowed by detail rows. A month that rendered without one parsed
+  fare is not covered; neither is today or any past day (a `DateUnavailable` for
+  today in detail mode is skipped, not cleared). `AveloScraper.run` also deletes
+  stored fares on requested future days the schedule no longer lists
+  (`persist.clear_unscheduled`, no sighting recorded).
 - Streamlit ≥1.63: use `width="stretch"` (not `use_container_width`); give
   every `st.plotly_chart` a unique `key`; widgets driven from callbacks use
   `session_state` keys, not `value=`. `tests/test_app.py` uses `AppTest`.
@@ -119,7 +128,9 @@ geocoding, routing, pushes); tests set `config.OFFLINE` via monkeypatch.
 
 `data/flights.db` holds real ILG⇄TPA/LAL fares (Oct 2026) plus older HVN rows
 from the first version (harmless; purged as they depart). `price_history`
-has several observations for ILG→LAL. Two `scrape_runs` exist. The owner has
+has several observations for ILG→LAL. `scrape_runs` held 15 runs on Oct 6 2026;
+runs from before the `status` column have NULL status (finished ones still count
+as `ok` baselines, the two that never finished do not). The owner has
 subscribed to the ntfy topic and was asked to save a rule, watch packages, and
 install the nightly job from the sidebar.
 

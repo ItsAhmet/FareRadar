@@ -367,6 +367,18 @@ def delete_day(
     return _run(sql, params, conn)
 
 
+def delete_days(origin: str, destination: str, days: Iterable[date], conn: sqlite3.Connection | None = None) -> int:
+    """Delete one route's flights on any of `days` in one statement."""
+    keys = sorted({d.isoformat() for d in days})
+    if not keys:
+        return 0
+    sql = f"""
+        DELETE FROM avelo_flights
+        WHERE origin = ? AND destination = ? AND substr(departure_datetime, 1, 10) IN ({_placeholders(keys)})
+    """
+    return _run(sql, [origin.upper(), destination.upper(), *keys], conn)
+
+
 # --------------------------------------------------------------------------- #
 # Reads
 # --------------------------------------------------------------------------- #
