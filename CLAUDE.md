@@ -17,7 +17,7 @@ Desktop: iCloud "Optimize Mac Storage" evicted ~20k `.venv` files (`ls -lO` show
 ```bash
 cd ~/avelo-finder
 source .venv/bin/activate            # venv already built; playwright chromium installed
-pytest -q                            # 90 tests, no network; AppTest boots the dashboard
+pytest -q                            # 172 tests, no network; AppTest boots the dashboard
 streamlit run app.py                 # dashboard (nothing scrapes on load)
 python launch.py [--detach|--stop]   # start if needed + open browser; ~/Desktop/Avelo Finder.command calls it
 python run_scraper.py --destinations TPA,LAL --start 2026-10-01 --end 2026-10-14   # targeted live scrape
@@ -34,7 +34,10 @@ geocoding, routing, pushes); tests set `config.OFFLINE` via monkeypatch.
 
 | File | Role |
 |---|---|
-| `config.py` | ILG hub, 16 destinations with region + lat/lon, CSS selectors, thresholds, env settings |
+| `config.py` | home airports (`HOME_CODES` from `AVELO_HOME_AIRPORTS`, `PRIMARY_HOME` = first), 16 destinations with region + lat/lon, CSS selectors, thresholds, env settings |
+| `trips.py` | trip keys: `airline\|origin\|dest\|date\|time-or-*`; watches/rules/bookings store these |
+| `persist.py` | writes one search result; deletes fares that vanished from covered days |
+| `runlock.py` | `data/scrape.lock`, one scrape at a time; `main()` exits 3 when held |
 | `models.py` | `Flight` frozen dataclass (price = member fare, `base_price` = public, `time_known`) |
 | `database.py` | SQLite schema + in-place migrations; flights, price_history, scrape_runs, route_day_seen, route_floor, events, watchlist, bookings, places, drive_times |
 | `scraper.py` | Playwright driver for Avelo's form + **pure parsers** (`parse_schedule`, `parse_lowfare_calendar`, `parse_select_page`, `plan_targets`) |
@@ -106,6 +109,8 @@ geocoding, routing, pushes); tests set `config.OFFLINE` via monkeypatch.
 - Streamlit ≥1.63: use `width="stretch"` (not `use_container_width`); give
   every `st.plotly_chart` a unique `key`; widgets driven from callbacks use
   `session_state` keys, not `value=`. `tests/test_app.py` uses `AppTest`.
+- Package/watch identity is the trip key, never the flight_id row.
+- A run's `status` (ok/partial/failed) decides whether it can be a signal baseline.
 - Total Getaway Cost = member fares only; `MemberBenefits` locks add-ons at $0.
 - Long scrapes run as a `Popen` from the dashboard with a log tail, cancel, and timeout.
 - Learning/explanatory output style: give brief `★ Insight` blocks when coding.

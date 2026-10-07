@@ -22,7 +22,7 @@ avelo-finder/
 ├── optimizer.py      Flexible Getaway engine: windows, mix-and-match, ranking
 ├── database.py       SQLite schema, migrations, upserts and queries
 ├── models.py         the shared Flight dataclass
-├── config.py         ILG hub, destinations by region with coordinates, selectors
+├── config.py         home airports (ILG, PHL, BWI), destinations by region with coordinates, selectors
 ├── mock_data.py      synthetic schedule for demos and tests
 ├── run_scraper.py    CLI entry point; the dashboard builds its argv from here
 ├── requirements.txt
@@ -36,14 +36,17 @@ avelo-finder/
 Python 3.10+ is required (developed on 3.13).
 
 ```bash
-cd avelo-finder
+cd ~/avelo-finder
 python3 -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 playwright install chromium        # one-time browser download (~100 MB)
 cp .env.example .env               # optional: tweak headless mode, DB path, etc.
-pytest -q                          # 89 tests, no network needed
+pytest -q                          # 172 tests, no network needed
 ```
+
+The project lives in `~/avelo-finder`, outside iCloud-synced folders. To start
+the dashboard with one click, use `~/Desktop/Avelo Finder.command`.
 
 ## Filter-before-scrape
 
