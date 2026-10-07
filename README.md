@@ -110,8 +110,10 @@ Scheduling: any cron/launchd entry works, e.g. nightly at 03:00:
 
 * Headless by default; `AVELO_HEADLESS=false` in `.env` or `--headful` shows the window.
 * One randomised user-agent and viewport per run (kept across retries so the
-  fingerprint stays consistent); cookies and localStorage persist between runs
-  in `data/browser_state.json` so each visit looks like a returning visitor;
+  fingerprint stays consistent); cookies (only cookies, not localStorage) persist
+  between runs in a per-airline file `data/browser_state_<code>.json` (Avelo is
+  `browser_state_XP.json`; the older `data/browser_state.json` is adopted once on
+  the first Avelo run) so each visit looks like a returning visitor;
   `navigator.webdriver` and friends are masked; Chromium runs with
   automation-control features disabled.
 * Human-like pacing: 2–5 s between page loads (`AVELO_DELAY_MIN` /

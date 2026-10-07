@@ -100,8 +100,9 @@ geocoding, routing, pushes); tests set `config.OFFLINE` via monkeypatch.
   *or* that text and raises `DateUnavailable` for the latter; `_pick_date` raises it only when the
   picker rendered other days **of the wanted month**. A picker with no selectable day at all, or one
   not showing the wanted month (no next-month paging yet), is a `ScrapeError` (retry; stored fares kept).
-- Stealth: one UA/viewport per run, cookies persisted to `data/browser_state.json`
-  (**cookies only** — persisting localStorage stops the app re-fetching routes/all),
+- Stealth: one UA/viewport per run, cookies persisted per airline to `data/browser_state_<code>.json`
+  (Avelo is `browser_state_XP.json`; the pre-phase-2 `data/browser_state.json` is adopted once, by
+  rename, on the first Avelo run; **cookies only** — persisting localStorage stops the app re-fetching routes/all),
   webdriver masked, trackers/images blocked, human pauses.
 
 ## Conventions
