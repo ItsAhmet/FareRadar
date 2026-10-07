@@ -196,7 +196,10 @@ def test_unknown_route_is_probed_then_gets_its_placeholders(f9db, monkeypatch):
     assert ("F9CAL-PHL-MCO", datetime(2026, 11, 14)) in stored()                                        # placeholder kept
     assert ("F9CAL-PHL-MCO", datetime(2026, 11, 11)) not in stored()                                    # shadowed by the timed row
     assert ("F9CAL-PHL-MCO", datetime(2026, 11, 10)) not in stored()                                    # searched: no nonstop that day
-    assert db.seen_in_run(s.run_id, "PHL", "MCO")[date(2026, 11, 10)] is None
+    seen = db.seen_in_run(s.run_id, "PHL", "MCO")
+    assert seen[date(2026, 11, 10)] is None
+    assert seen[date(2026, 11, 11)] == 90.0                                    # the nonstop's fare, not the calendar's 60
+    assert seen[date(2026, 11, 14)] == 95                                      # not searched: the calendar's fare
 
 
 def test_connecting_only_route_stores_nothing_and_is_skipped_next_time(f9db, monkeypatch):
@@ -323,3 +326,181 @@ def test_refresh_catalog_writes_both_directions_and_survives_failures(f9db, monk
     assert ("PHL", "MCO") in db.catalog_routes("F9", now=later)
     monkeypatch.setattr(config, "OFFLINE", True)
     assert frontier.refresh_catalog(["BWI"], now=later) == 0                                    # offline, no injected fetch
+
+
+# --------------------------------------------------------------------------- #
+# Fix round 1: blocks on the last route, calendar blocks, sightings of searched days
+# --------------------------------------------------------------------------- #
+
+import signals
+
+
+def test_block_on_the_only_route_ends_the_run_as_blocked(f9db, monkeypatch):
+    db.set_route_nonstop("F9", "PHL", "MCO", True)
+    db.upsert_flights([timed_flight(10), timed_flight(11)])
+    s = scraper_with(monkeypatch, "detail", days={d: BlockedError("challenge") for d in WANTED})
+    report = run_routes(s)                                                     # one route: the ordinary targeted scrape
+    assert len([c for c in s.calls if c[0] == "day"]) == 2 and report.failed == 2
+    assert report.blocked
+    assert len(stored()) == 2 and db.seen_in_run(s.run_id, "PHL", "MCO") == {}
+
+
+def test_block_on_the_last_of_two_routes_ends_the_run_as_blocked(f9db, monkeypatch):
+    db.set_route_nonstop("F9", "PHL", "MCO", True)
+    db.set_route_nonstop("F9", "MCO", "PHL", True)
+    s = scraper_with(monkeypatch, "detail")
+    calls = []
+
+    async def by_route(origin, dest, day):
+        calls.append(origin)
+        if origin == "MCO":
+            raise BlockedError("challenge")
+        return [timed_flight(day.day)]
+
+    monkeypatch.setattr(s, "scrape_day", by_route)
+    report = run_routes(s, routes=[("PHL", "MCO"), ("MCO", "PHL")])
+    assert calls.count("PHL") == 6 and calls.count("MCO") == 2
+    assert report.blocked and (report.succeeded, report.failed) == (6, 2)
+
+
+def test_one_block_followed_by_a_success_is_not_a_blocked_run(f9db, monkeypatch):
+    db.set_route_nonstop("F9", "PHL", "MCO", True)
+    days = {d: (BlockedError("challenge") if d.day % 2 == 0 else [timed_flight(d.day)]) for d in WANTED}
+    report = run_routes(scraper_with(monkeypatch, "detail", days=days))
+    assert not report.blocked and (report.succeeded, report.failed) == (3, 3)
+
+
+def test_searched_days_keep_the_nonstop_fare_as_their_sighting(f9db, monkeypatch):
+    db.set_route_nonstop("F9", "PHL", "MCO", True)
+    days = {date(2026, 11, 10): [timed_flight(10, price=120.0)], date(2026, 11, 11): [timed_flight(11, price=90.0)],
+            date(2026, 11, 14): frontier.ScrapeError("bad page")}              # Nov 12: searched, no nonstop
+    s = scraper_with(monkeypatch, "full", calendar=CAL, days=days)
+    run_routes(s)
+    seen = db.seen_in_run(s.run_id, "PHL", "MCO")
+    assert (seen[date(2026, 11, 10)], seen[date(2026, 11, 11)]) == (120.0, 90.0)   # not the calendar's 80 and 60
+    assert seen[date(2026, 11, 12)] is None and seen[date(2026, 11, 13)] is None   # no nonstop; not priced by the calendar
+    assert seen[date(2026, 11, 14)] == 95                                          # search failed: the calendar's answer stands
+    assert stored() == [("F9-2415-PHL-MCO", datetime(2026, 11, 10, 8)), ("F9-2415-PHL-MCO", datetime(2026, 11, 11, 8)),
+                        ("F9CAL-PHL-MCO", datetime(2026, 11, 14))]
+
+
+def test_full_run_after_a_detail_run_raises_no_signal_when_fares_did_not_change(f9db, monkeypatch):
+    db.set_route_nonstop("F9", "PHL", "MCO", True)
+    nonstops = {d: [timed_flight(d.day, price=90.0)] for d in WANTED}
+    one = scraper_with(monkeypatch, "detail", days=nonstops)
+    run_routes(one)
+    db.finish_run(one.run_id, {}, status="ok")
+    cheaper_connections = ([cal_flight(d.day, 60) for d in sorted(WANTED)], [date(2026, 11, d) for d in range(1, 31)])
+    two = scraper_with(monkeypatch, "full", calendar=cheaper_connections, days=nonstops)
+    run_routes(two)
+    assert db.seen_in_run(two.run_id, "PHL", "MCO") == db.seen_in_run(one.run_id, "PHL", "MCO") == {d: 90.0 for d in WANTED}
+    assert signals.run_detection(two.run_id) == []
+
+
+class FakeCalendarPage:
+    """Stands in for the Playwright page on Frontier's calendar view: `body` is what the calendar XHR's json()
+    gives (an exception is raised; None = the XHR never arrives) and `html` is what the page shows."""
+
+    def __init__(self, body, html="<html><title>Select | Frontier Airlines</title></html>"):
+        self.body, self.html, self.urls = body, html, []
+
+    async def goto(self, url, **_kwargs):
+        self.urls.append(url)
+
+    def expect_response(self, predicate):
+        page = self
+
+        class Response:
+            url = "https://booking.flyfrontier.com/Flight/GetLowFareCalendarAvailability"
+
+            async def json(self):
+                if isinstance(page.body, Exception):
+                    raise page.body
+                return page.body
+
+        class Waiting:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, *_exc):
+                if exc_type is None and (page.body is None or not predicate(Response())):
+                    raise frontier.PlaywrightTimeout("Timeout 30000ms exceeded while waiting for event \"response\"")
+                return False
+
+            @property
+            def value(self):
+                async def get():
+                    return Response()
+                return get()
+
+        return Waiting()
+
+    async def content(self):
+        return self.html
+
+
+CHALLENGE = '<html><div id="px-captcha">Press &amp; Hold</div></html>'
+NOT_A_CALENDAR = [{"appId": "PXabc", "blockScript": "/px/captcha/captcha.js"}, {"success": False},
+                  ValueError("Expecting value: line 1 column 1 (char 0)")]
+
+
+def month_search(page):
+    s = frontier.FrontierScraper(member=False, screenshots=False, max_retries=0)
+    s._page = page
+    return asyncio.run(s.scrape_calendar_month("PHL", "MCO", date(2026, 11, 12)))
+
+
+def test_scrape_calendar_month_reads_the_captured_response():
+    page = FakeCalendarPage(load("lowfare_calendar_PHL_MCO_2026-11.json"))
+    flights, answered = month_search(page)
+    assert len(answered) == 30 and answered[0] == date(2026, 11, 1) and flights
+    assert all(f.flight_id == "F9CAL-PHL-MCO" and not f.time_known for f in flights)
+    assert "o1=PHL&d1=MCO" in page.urls[0] and "c=true" in page.urls[0]
+
+
+def test_scrape_calendar_month_without_a_response_is_a_block_or_a_timeout():
+    with pytest.raises(BlockedError):
+        month_search(FakeCalendarPage(None, html=CHALLENGE))
+    with pytest.raises(frontier.PlaywrightTimeout):
+        month_search(FakeCalendarPage(None))
+
+
+@pytest.mark.parametrize("body", NOT_A_CALENDAR)
+def test_scrape_calendar_month_with_an_unusable_response(body):
+    with pytest.raises(BlockedError):
+        month_search(FakeCalendarPage(body, html=CHALLENGE))                   # the bot wall answered the XHR
+    with pytest.raises(Exception) as caught:
+        month_search(FakeCalendarPage(body))                                   # a normal page: a plain failure
+    assert not isinstance(caught.value, BlockedError)
+    if not isinstance(body, Exception):
+        assert isinstance(caught.value, ScrapeError)
+
+
+def test_calendar_without_a_priced_day_on_a_challenge_page_is_a_block():
+    payload = load("lowfare_calendar_PHL_MCO_2026-11.json")
+    for week in payload["calendarSections"][0]["weeks"]:
+        for cell in week["days"]:
+            cell["isUnavailable"] = True
+    assert month_search(FakeCalendarPage(payload)) == ([], [])
+    with pytest.raises(BlockedError):
+        month_search(FakeCalendarPage(payload, html=CHALLENGE))
+
+
+@pytest.mark.parametrize("body", NOT_A_CALENDAR)
+def test_calendar_answered_by_the_bot_wall_stops_the_run(f9db, monkeypatch, body):
+    db.set_route_nonstop("F9", "PHL", "MCO", True)
+    db.upsert_flights([cal_flight(13, 99)])
+    s = frontier.FrontierScraper(mode="calendar", screenshots=False, max_retries=0,
+                                 run_id=db.start_run("calendar", [("PHL", "MCO")], airline="F9"))
+    for name in ("_polite_delay", "_save_state", "_snapshot"):
+        monkeypatch.setattr(s, name, _no_wait)
+    s._page = FakeCalendarPage(body, html=CHALLENGE)                           # the real scrape_calendar_month reads it
+    wanted = WANTED | {date(2026, 12, 1), date(2027, 1, 5)}                    # three months
+    report = ScrapeReport()
+    asyncio.run(s._run_routes([("PHL", "MCO")] * 3, wanted, TODAY, report))
+    assert report.blocked and (report.attempted, report.failed) == (2, 2)      # two in a row, then stop
+    assert ("F9CAL-PHL-MCO", datetime(2026, 11, 13)) in stored() and db.seen_in_run(s.run_id, "PHL", "MCO") == {}
+
+
+async def _no_wait(*_a, **_k):
+    return None

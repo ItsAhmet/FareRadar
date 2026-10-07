@@ -248,8 +248,6 @@ class FrontierScraper(BaseScraper):
         for origin, dest in routes:
             origin, dest = origin.upper(), dest.upper()
             if self._blocked_streak >= 2:
-                report.blocked = True
-                log.error("Frontier is challenging us; stopping this airline for the run")
                 break
             known = database.route_nonstop(AIRLINE, origin, dest)
             if known is False:
@@ -275,30 +273,39 @@ class FrontierScraper(BaseScraper):
             else:
                 days = probe_days(calendar_flights, config.FRONTIER_PROBE_DAYS) if known is None else []
 
-            searched, no_nonstop = 0, set()
+            searched: set[date] = set()
+            found_nonstop = False
             for day in days:
                 if self._blocked_streak >= 2:
                     break
                 flights = await self._attempt(report, f"{origin}-{dest} {day}", self.scrape_day, origin, dest, day)
                 if flights is None:
                     continue
-                searched += 1
+                searched.add(day)
                 flights = [self._tag(f) for f in flights]
                 report.flights_written += persist.save_day(self.run_id, origin, dest, day, flights, airline=AIRLINE)
-                if not flights:
-                    no_nonstop.add(day)  # searched just now: the calendar's fare that day is a connection
-                elif known is not True:
+                if flights and known is not True:
                     database.set_route_nonstop(AIRLINE, origin, dest, True)
                     known = True
+                found_nonstop = found_nonstop or bool(flights)
                 log.info("F9 %s→%s %s: %d nonstop(s)", origin, dest, day, len(flights))
 
-            if known is None and searched:
+            if known is None and searched and not found_nonstop:
                 database.set_route_nonstop(AIRLINE, origin, dest, False)
-                log.info("F9 %s→%s: %d day(s) searched, no nonstop — treated as connecting-only", origin, dest, searched)
+                log.info("F9 %s→%s: %d day(s) searched, no nonstop — treated as connecting-only", origin, dest, len(searched))
             if known is True:
+                # A day searched in this run already has its answer from save_day: its real nonstops (or none) and
+                # the matching sighting. The calendar's fare for that day may be a connection, so the day is left
+                # out of the calendar save entirely; otherwise its sighting would be replaced by the calendar price.
                 for covered, flights in months:
-                    flights = [f for f in flights if f.departure_date not in no_nonstop]
+                    covered = [d for d in covered if d not in searched]
+                    flights = [f for f in flights if f.departure_date not in searched]
                     report.flights_written += persist.save_calendar(self.run_id, origin, dest, covered, flights, airline=AIRLINE)
+
+        # Checked after the loop, not at the top of the next route: the two blocks may fall on the last or only route.
+        if self._blocked_streak >= 2:
+            report.blocked = True
+            log.error("Frontier is challenging us; stopping this airline for the run")
 
     async def _attempt(self, report: ScrapeReport, tag: str, fn, *args):
         """One counted search: returns its result, or None after recording the failure."""
@@ -328,11 +335,23 @@ class FrontierScraper(BaseScraper):
             async with page.expect_response(lambda r: config.FRONTIER_CALENDAR_ENDPOINT in r.url) as info:
                 await page.goto(url, wait_until="domcontentloaded")
             payload = await (await info.value).json()
-        except PlaywrightTimeout:
-            if is_challenge_page(await page.content()):
+            flights, answered = parse_calendar(payload, origin, dest, member=self.member)
+        except Exception:
+            # No usable calendar: the request never came, or its answer was not calendar JSON (the bot wall answers
+            # the XHR too). If the page shows the challenge this is a block, which must count towards stopping the run.
+            if await self._challenged():
                 raise BlockedError("challenge page instead of the calendar") from None
             raise
-        return parse_calendar(payload, origin, dest, member=self.member)
+        if not flights and await self._challenged():
+            raise BlockedError("challenge page instead of the calendar")
+        return flights, answered
+
+    async def _challenged(self) -> bool:
+        """Is the page showing a bot challenge right now? (False when the page cannot be read.)"""
+        try:
+            return is_challenge_page(await self.page.content())
+        except Exception:  # noqa: BLE001 - mid-navigation or closed page: cannot tell, so not a block
+            return False
 
     async def scrape_day(self, origin: str, dest: str, day: date) -> list[Flight]:
         """One day's search: every nonstop with its times and both fares ([] when the day has none)."""
