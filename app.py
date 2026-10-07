@@ -757,7 +757,7 @@ def alerts_tab() -> None:
             d = now - float(b["price_paid"])
             verdict = f" · now ${now:,.0f} → {'you beat the market by' if d >= 0 else 'it dropped'} ${abs(d):,.0f}"
         c1.write(f"**{b['label']}** — paid ${b['price_paid']:,.0f} on {b['booked_at'][:10]}{verdict}"
-                 + (f" · saved ${bookings.fare_savings(b['payload']):,.0f} with Plus fares" if bookings.fare_savings(b['payload']) else "")
+                 + (f" · saved ${bookings.fare_savings(b['payload'], 'XP'):,.0f} with Plus fares" if bookings.fare_savings(b['payload'], 'XP') else "")
                  + (f" · _{b['notes']}_" if b.get("notes") else ""))
         if c2.button("Remove", key=f"rmb_{b['booking_id']}"):
             database.remove_booking(b["booking_id"])
