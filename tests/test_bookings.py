@@ -36,7 +36,7 @@ def test_booking_payload_and_roi(conn, monkeypatch):
     assert bookings.plus_roi(conn)["bookings"] == 0
     db.add_booking("Tampa", payload, 135, conn=conn)
     roi = bookings.plus_roi(conn)
-    assert roi == {"bookings": 1, "fare_savings": 80, "perk_value": 100, "total_value": 180, "annual_cost": 99, "paid_off": True, "ratio": 1.82}
+    assert roi == {"bookings": 1, "legs": 2, "fare_savings": 80, "perk_value": 100, "total_value": 180, "annual_cost": 99, "paid_off": True, "ratio": 1.82}
 
 
 def test_booked_trip_tracks_market_and_alerts_once_per_drop(conn):
@@ -125,3 +125,38 @@ def test_booked_drop_push_that_fails_is_retried(conn, monkeypatch):
     assert "alerted_total" not in db.list_bookings(conn)[0]["state"]
     alerts.evaluate_and_deliver(None, [], conn)
     assert db.list_bookings(conn)[0]["state"]["alerted_total"] == it.total_price
+
+
+def mixed_booking(conn):
+    out = Flight(airline="F9", origin="PHL", destination="TPA", departure_datetime=datetime(2026, 10, 8, 9), price=84,
+                 base_price=84, member_price=79, duration_minutes=150, flight_id="F9-1-PHL-TPA")
+    back = Flight(airline="XP", origin="TPA", destination="PHL", departure_datetime=datetime(2026, 10, 11, 15), price=61,
+                  base_price=101, member_price=61, is_member_fare=True, duration_minutes=150, flight_id="AVELO-TPA-PHL")
+    db.upsert_flights([out, back], conn)
+    (it,) = build_itineraries([out], [back], GetawayQuery({"TPA"}, [Window(datetime(2026, 10, 7, 18), datetime(2026, 10, 11, 23, 59))], origins=["PHL"]))
+    db.add_booking("mixed", bookings.booking_payload(it), it.total_price, conn=conn)
+    return it
+
+
+def test_plus_roi_counts_only_avelo_legs(conn, monkeypatch):
+    monkeypatch.setattr(config, "PLUS_VALUE_PER_LEG", 50.0)
+    mixed_booking(conn)
+    payload = db.list_bookings(conn)[0]["payload"]
+    assert (payload["out_airline"], payload["in_airline"], payload["out_member"]) == ("F9", "XP", 79)
+    roi = bookings.plus_roi(conn)
+    assert roi["legs"] == 1 and roi["fare_savings"] == 40 and roi["perk_value"] == 50      # the Avelo leg only
+
+
+def test_program_savings_is_what_discount_den_would_have_saved(conn):
+    mixed_booking(conn)
+    den = bookings.program_savings("f9", conn)
+    assert den == {"airline": "F9", "program": "Discount Den", "legs": 1, "would_have_saved": 5.0}
+    assert bookings.program_savings("XP", conn)["would_have_saved"] == 0.0     # already paid the member fare
+
+
+def test_bookings_saved_before_airlines_count_as_avelo(conn, monkeypatch):
+    monkeypatch.setattr(config, "PLUS_VALUE_PER_LEG", 50.0)
+    it = package(conn)
+    old = {k: v for k, v in bookings.booking_payload(it).items() if not k.endswith(("_airline", "_member"))}
+    db.add_booking("old", old, it.total_price, conn=conn)
+    assert bookings.plus_roi(conn)["legs"] == 2 and bookings.program_savings("F9", conn)["legs"] == 0

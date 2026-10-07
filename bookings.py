@@ -12,6 +12,7 @@ import sqlite3
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+import airlines as airline_registry
 import config
 import database
 import trips
@@ -33,6 +34,10 @@ def booking_payload(it: Itinerary) -> dict:
             "out_base": it.outbound.base_price,
             "in_price": it.inbound.price,
             "in_base": it.inbound.base_price,
+            "out_airline": it.outbound.airline,
+            "in_airline": it.inbound.airline,
+            "out_member": it.outbound.member_price,
+            "in_member": it.inbound.member_price,
             "member_fare": it.member_fare,
             "destination_city": it.destination_city,
             "out_date": it.outbound.departure_date.isoformat(),
@@ -42,10 +47,17 @@ def booking_payload(it: Itinerary) -> dict:
     return key
 
 
-def fare_savings(payload: dict) -> float:
-    """Member fare savings for the two legs at booking time (0 if unknown)."""
+def _leg_airline(payload: dict, leg: str) -> str:
+    """Bookings saved before airlines existed were Avelo."""
+    return (payload.get(f"{leg}_airline") or "XP").upper()
+
+
+def fare_savings(payload: dict, airline: str | None = None) -> float:
+    """Member-fare savings obtained on the two legs at booking time (0 if unknown), optionally one airline's legs."""
     total = 0.0
     for leg in ("out", "in"):
+        if airline is not None and _leg_airline(payload, leg) != airline.upper():
+            continue
         base, price = payload.get(f"{leg}_base"), payload.get(f"{leg}_price")
         if base is not None and price is not None:
             total += max(float(base) - float(price), 0.0)
@@ -119,15 +131,16 @@ def evaluate_bookings(conn: sqlite3.Connection | None = None) -> list[Event]:
 
 
 def plus_roi(conn: sqlite3.Connection | None = None) -> dict:
-    """Membership value from booked trips: fare savings plus the value of the
-    free carry-on and seat selection on every booked leg."""
-    bookings = database.list_bookings(conn)
-    fare = round(sum(fare_savings(b["payload"]) for b in bookings), 2)
-    perks = round(len(bookings) * 2 * config.PLUS_VALUE_PER_LEG, 2)
+    """Avelo PLUS value from booked Avelo legs: fare savings plus the value of the free carry-on and seat."""
+    booked = database.list_bookings(conn)
+    legs = sum(1 for b in booked for leg in ("out", "in") if _leg_airline(b["payload"], leg) == "XP")
+    fare = round(sum(fare_savings(b["payload"], "XP") for b in booked), 2)
+    perks = round(legs * config.PLUS_VALUE_PER_LEG, 2)
     total = round(fare + perks, 2)
     cost = config.PLUS_ANNUAL_COST
     return {
-        "bookings": len(bookings),
+        "bookings": len(booked),
+        "legs": legs,
         "fare_savings": fare,
         "perk_value": perks,
         "total_value": total,
@@ -135,3 +148,19 @@ def plus_roi(conn: sqlite3.Connection | None = None) -> dict:
         "paid_off": cost > 0 and total >= cost,
         "ratio": round(total / cost, 2) if cost > 0 else None,
     }
+
+
+def program_savings(airline: str, conn: sqlite3.Connection | None = None) -> dict:
+    """What an airline's membership program would have saved on booked legs paid at the public fare."""
+    code = airline.strip().upper()
+    legs, saved = 0, 0.0
+    for b in database.list_bookings(conn):
+        p = b["payload"]
+        for leg in ("out", "in"):
+            if _leg_airline(p, leg) != code or f"{leg}_airline" not in p:
+                continue
+            legs += 1
+            price, member = p.get(f"{leg}_price"), p.get(f"{leg}_member")
+            if price is not None and member is not None:
+                saved += max(float(price) - float(member), 0.0)
+    return {"airline": code, "program": airline_registry.get(code).member_program, "legs": legs, "would_have_saved": round(saved, 2)}
