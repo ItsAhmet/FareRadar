@@ -197,3 +197,24 @@ def test_failed_scrape_still_reports_errors(mock_db):
     at.run()
     assert not at.exception, at.exception
     assert any("Scrape reported errors" in e.value for e in at.error)
+
+
+def test_packages_from_a_second_home_airport_show_up(mock_db, monkeypatch):
+    monkeypatch.setattr(config, "HOME_CODES", ["ILG", "PHL"])
+    with database.connection() as conn:
+        conn.execute("""
+            INSERT INTO avelo_flights (flight_id, origin, destination, departure_datetime, arrival_datetime, price,
+                currency, duration_minutes, flight_number, base_price, is_member_fare, promo_code, timestamp_scraped)
+            SELECT replace(flight_id, 'ILG', 'PHL'),
+                   CASE origin WHEN 'ILG' THEN 'PHL' ELSE origin END,
+                   CASE destination WHEN 'ILG' THEN 'PHL' ELSE destination END,
+                   departure_datetime, arrival_datetime, price - 40, currency, duration_minutes, flight_number,
+                   base_price, is_member_fare, promo_code, timestamp_scraped
+            FROM avelo_flights WHERE origin = 'ILG' OR destination = 'ILG'
+        """)
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    assert not at.exception, at.exception
+    tables = [df.value for df in at.dataframe if "Home" in df.value.columns]
+    assert tables and (tables[0]["Home"] == "PHL").any()
+    phl = tables[0][tables[0]["Home"] == "PHL"]
+    assert (phl["Home-side $"] > 0).all(), "PHL parking (default $17/day) must be counted"

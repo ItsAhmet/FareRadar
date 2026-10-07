@@ -37,6 +37,7 @@ from optimizer import (
     Itinerary,
     clear_drives,
     enrich_drives,
+    enrich_home,
     enrich_weather,
     find_itineraries,
     intersect_windows,
@@ -70,7 +71,7 @@ def _db_version() -> float:
 
 @st.cache_data(show_spinner=False)
 def load_selection_stats(destinations: tuple[str, ...], start: date, end: date, _version: float) -> dict:
-    return database.selection_stats(config.PRIMARY_HOME, list(destinations), start, end)
+    return database.selection_stats(config.HOME_CODES, list(destinations), start, end)
 
 
 @st.cache_data(show_spinner=False)
@@ -80,7 +81,7 @@ def load_calendar(start: date, end: date, _version: float) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def load_freshness(destinations: tuple[str, ...], _version: float) -> pd.DataFrame:
-    return pd.DataFrame(database.route_freshness(config.PRIMARY_HOME, list(destinations)))
+    return pd.DataFrame(database.route_freshness(config.HOME_CODES, list(destinations)))
 
 
 @st.cache_data(show_spinner=False)
@@ -149,6 +150,8 @@ def run_search(query: GetawayQuery) -> list[Itinerary]:
         query.max_budget,
         query.allow_mix,
         query.max_pair_miles,
+        tuple(query.origins),
+        query.allow_open_jaw,
         _db_version(),
     )
     cache = _search_cache()
@@ -241,7 +244,7 @@ def availability_picker() -> tuple[Availability, Availability | None, bool]:
 
 def sidebar() -> tuple[GetawayQuery | None, list[str], tuple[date, date], str, dict]:
     st.sidebar.title("✈️ Avelo Getaways")
-    st.sidebar.caption(f"Nonstop on Avelo from {config.HOME_AIRPORTS[config.PRIMARY_HOME].city}")
+    st.sidebar.caption(f"Nonstop on Avelo from {' · '.join(config.HOME_CODES)}")
 
     today = date.today()
     if st.sidebar.button("⚡ This weekend", help="Next 5 days, every destination, scrape now", width="stretch"):
@@ -301,6 +304,7 @@ def sidebar() -> tuple[GetawayQuery | None, list[str], tuple[date, date], str, d
         "destinations": destinations, "availability": availability, "min_nights": min_nights,
         "max_budget": float(budget), "allow_mix": allow_mix, "max_pair_miles": float(max_pair),
         "span_days": (span_end - date.today()).days, "holiday_extend": holiday_extend,
+        "origins": list(config.HOME_CODES), "allow_open_jaw": False,
     }
     st.session_state.place_mode = {"place": place, "drives": drives, "value": float(drive_value)}
     windows = availability.windows(span_start, span_end, holiday_extend=holiday_extend)
@@ -309,6 +313,7 @@ def sidebar() -> tuple[GetawayQuery | None, list[str], tuple[date, date], str, d
     query = None
     if destinations and windows:
         query = GetawayQuery(
+            origins=list(config.HOME_CODES),
             destinations=set(destinations),
             windows=windows,
             min_nights=min_nights,
@@ -334,6 +339,7 @@ def rule_panel() -> None:
             payload = alerts.rule_payload(
                 f["destinations"], f["availability"], f["min_nights"], f["max_budget"], f["allow_mix"],
                 f["max_pair_miles"], max(f["span_days"], 7), holiday_extend=f.get("holiday_extend", False),
+                origins=f.get("origins"), allow_open_jaw=f.get("allow_open_jaw", False),
             )
             database.add_watch("rule", label.strip(), payload)
             st.success(f"Saved rule '{label.strip()}'. You'll be alerted when new packages match.")
@@ -395,10 +401,10 @@ def scraper_panel(destinations: list[str], start: date, end: date) -> dict:
     ).strip().upper()
     st.session_state.promo_code_value = promo
     headful = st.sidebar.checkbox("Show browser window", value=False)
-    routes = len(destinations) * 2
+    routes = len(destinations) * 2 * len(config.HOME_CODES)
     days = (end - start).days + 1
     st.sidebar.caption(
-        f"Target: {routes} routes × {days} days · {config.PRIMARY_HOME} ⇄ {', '.join(destinations) or '—'}"
+        f"Target: {routes} routes × {days} days · {'/'.join(config.HOME_CODES)} ⇄ {', '.join(destinations) or '—'}"
         + (f" · promo {promo}" if promo else "")
     )
 
@@ -417,7 +423,8 @@ def scraper_panel(destinations: list[str], start: date, end: date) -> dict:
             st.rerun()
         database.maintenance()
         cmd = build_command(
-            destinations, start, end, mode=depth, mock=source.startswith("Mock"), headful=headful, promo=promo or None
+            destinations, start, end, mode=depth, mock=source.startswith("Mock"), headful=headful, promo=promo or None,
+            origins=list(config.HOME_CODES),
         )
         config.SCRAPE_LOG.parent.mkdir(parents=True, exist_ok=True)
         log_file = open(config.SCRAPE_LOG, "w")
@@ -630,9 +637,11 @@ def package_inspector(ranked: list[Itinerary], version: float) -> None:
     it = top[labels.index(choice)]
     b1, b2, b3 = st.columns([1, 1, 2])
     if b1.button("★ Watch this package", help="Alert me when its total drops or a leg disappears"):
-        watch_id = database.add_watch("package", alerts.package_label(it), alerts.package_key(it))
-        database.update_watch_state(watch_id, {"last_total": it.total_price})
-        st.success(f"Watching {alerts.package_label(it)} at ${it.total_price:,.0f}")
+        watch_id, created = alerts.watch_package(it)
+        if created:
+            st.success(f"Watching {alerts.package_label(it)} at ${it.total_price:,.0f}")
+        else:
+            st.info("You're already watching this package.")
     if b2.button("✈️ Open on Avelo", help="Opens a visible browser with each leg's search filled in and stops at the results. Never books."):
         legs = [(it.outbound.origin, it.outbound.destination, it.outbound.departure_date),
                 (it.inbound.origin, it.inbound.destination, it.inbound.departure_date)]
@@ -796,10 +805,8 @@ def season_tab(itins: list[Itinerary], windows: int) -> None:
                                 "Fit": st.column_config.ProgressColumn(min_value=0, max_value=1, format="%.0f%%"),
                                 "Sun": st.column_config.ProgressColumn(min_value=0, max_value=1, format="%.2f")})
     if st.button("★ Watch all planned trips"):
-        for t in plan.trips:
-            wid = database.add_watch("package", alerts.package_label(t), alerts.package_key(t))
-            database.update_watch_state(wid, {"last_total": t.total_price})
-        st.success(f"Watching {len(plan.trips)} trips.")
+        created = sum(alerts.watch_package(t)[1] for t in plan.trips)
+        st.success(f"Watching {created} new trip(s); {len(plan.trips) - created} already watched.")
     itinerary_timeline(plan.trips, n=len(plan.trips), key="season_timeline")
 
 
@@ -867,14 +874,15 @@ def results_table(ranked: list[Itinerary], version: float = 0.0) -> None:
             "Δ°F vs home": st.column_config.NumberColumn(format="%+.0f°F"),
             "Drive (min)": st.column_config.NumberColumn(format="%.0f"),
             "Door-to-door": st.column_config.NumberColumn(format="$%d", help="Fares plus drive time at your $/hour"),
+            "Home-side $": st.column_config.NumberColumn(format="$%d"),
             "Member Fare": st.column_config.CheckboxColumn(disabled=True),
             "Times Verified": st.column_config.CheckboxColumn(disabled=True),
         },
         column_order=[
-            "Rank", "Window", "Destination", "Route Mix", "Total Getaway Cost", "Deal vs Typical", "Trend", "Signals",
+            "Rank", "Window", "Destination", "Home", "Route Mix", "Total Getaway Cost", "Deal vs Typical", "Trend", "Signals",
             "Out Route", "Out Date", "Out Time", "Out Price",
             "Back Route", "Back Date", "Back Time", "Back Price",
-            "Nights", "Fit", "Sun Score", "Δ°F vs home", "Drive (min)", "Door-to-door",
+            "Nights", "Fit", "Sun Score", "Δ°F vs home", "Drive (min)", "Door-to-door", "Home-side $",
             "Member Fare", "Savings vs Public", "Add-on Fees", "Times Verified",
             "Airport Gap (mi)", "Last Scraped",
         ],
@@ -890,8 +898,8 @@ def calendar_heatmap(cal: pd.DataFrame, destinations: list[str], span: tuple[dat
     if cal.empty:
         st.info("No fares in this span to draw a calendar for.")
         return
-    out = cal[(cal.origin == config.PRIMARY_HOME) & cal.destination.isin(destinations)]
-    back = cal[(cal.destination == config.PRIMARY_HOME) & cal.origin.isin(destinations)]
+    out = cal[cal.origin.isin(config.HOME_CODES) & cal.destination.isin(destinations)]
+    back = cal[cal.destination.isin(config.HOME_CODES) & cal.origin.isin(destinations)]
     sub = pd.concat([out, back])
     if sub.empty:
         st.info("No fares for the selected destinations in this span.")
@@ -999,6 +1007,7 @@ def main() -> None:
         enrich_drives(itins, {c: m for c, (m, _src) in pm["drives"].items()}, pm["value"])
     else:
         clear_drives(itins)  # run_search reuses cached objects; drop a cleared place's drives and rate
+    enrich_home(itins, database.home_costs())
     ranked = {
         "Cheapest package": rank_by_price,
         "Best window fit": rank_by_schedule,
