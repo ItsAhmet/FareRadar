@@ -294,3 +294,67 @@ def test_only_finished_ok_runs_are_baselines(conn):
     current = db.start_run("calendar", [("ILG", "TPA")], conn=conn)
     assert db.previous_run_for_route(current, "ILG", "TPA", conn) == legacy
     assert db.last_runs(1, conn)[0]["status"] is None   # current run not finished yet
+
+
+def f9(day=10, hour=9, price=84.0, dd=83.0, number="2415", origin="PHL", dest="MCO"):
+    return Flight(origin=origin, destination=dest, departure_datetime=datetime(2026, 10, day, hour), price=price,
+                  base_price=price, member_price=dd, duration_minutes=166, flight_number=number, airline="F9",
+                  flight_id=f"F9-{number}-{origin}-{dest}")
+
+
+def test_airline_and_member_price_round_trip(conn):
+    db.upsert_flights([f9(), flight(origin="PHL", dest="MCO", day=10, hour=12, price=70, base=99, number="XP9")], conn)
+    rows = db.query_flights(["PHL"], ["MCO"], date(2026, 10, 10), date(2026, 10, 10), conn=conn)
+    by_airline = {r.airline: r for r in rows}
+    assert set(by_airline) == {"F9", "XP"}
+    assert (by_airline["F9"].member_price, by_airline["F9"].base_price, by_airline["F9"].flight_number) == (83.0, 84.0, "2415")
+    only_f9 = db.query_flights(["PHL"], ["MCO"], date(2026, 10, 10), date(2026, 10, 10), conn=conn, airlines=["f9"])
+    assert [r.airline for r in only_f9] == ["F9"]
+    assert db.find_trip("F9|PHL|MCO|2026-10-10|09:00", conn).price == 84.0
+    assert db.find_trip("XP|PHL|MCO|2026-10-10|09:00", conn) is None
+    hist = conn.execute("SELECT airline FROM price_history WHERE flight_id = 'F9-2415-PHL-MCO'").fetchone()
+    assert hist["airline"] == "F9"
+
+
+def test_pre_phase2_database_migrates_in_place(tmp_path):
+    path = tmp_path / "old.db"
+    raw = sqlite3.connect(path)
+    raw.executescript("""
+        CREATE TABLE avelo_flights (flight_id TEXT NOT NULL, origin TEXT NOT NULL, destination TEXT NOT NULL,
+            departure_datetime TEXT NOT NULL, arrival_datetime TEXT, price REAL NOT NULL, currency TEXT NOT NULL DEFAULT 'USD',
+            duration_minutes INTEGER, flight_number TEXT, base_price REAL, is_member_fare INTEGER NOT NULL DEFAULT 0,
+            promo_code TEXT, timestamp_scraped TEXT NOT NULL, PRIMARY KEY (flight_id, departure_datetime));
+        CREATE TABLE price_history (flight_id TEXT NOT NULL, origin TEXT NOT NULL, destination TEXT NOT NULL,
+            departure_datetime TEXT NOT NULL, price REAL NOT NULL, base_price REAL, promo_code TEXT, scraped_at TEXT NOT NULL,
+            PRIMARY KEY (flight_id, departure_datetime, scraped_at));
+        CREATE TABLE scrape_runs (run_id INTEGER PRIMARY KEY AUTOINCREMENT, started_at TEXT NOT NULL, finished_at TEXT,
+            mode TEXT NOT NULL, routes TEXT NOT NULL, promo_code TEXT, summary TEXT, status TEXT);
+        INSERT INTO avelo_flights VALUES ('LOWFARE-ILG-TPA','ILG','TPA','2026-10-10T00:00',NULL,77,'USD',NULL,NULL,119,1,NULL,'2026-10-07T00:20:00');
+        INSERT INTO avelo_flights VALUES ('AVELO-ILG-TPA','ILG','TPA','2026-10-12T10:30','2026-10-12T13:07',129,'USD',157,'532',129,0,NULL,'2026-10-07T00:55:00');
+        INSERT INTO scrape_runs (started_at, finished_at, mode, routes, status) VALUES ('2026-10-07T00:53','2026-10-07T00:56','detail','[]','ok');
+    """)
+    raw.commit()
+    raw.close()
+    conn = db.get_connection(path)
+    rows = {r["flight_id"]: dict(r) for r in conn.execute("SELECT * FROM avelo_flights")}
+    assert rows["LOWFARE-ILG-TPA"]["airline"] == "XP" and rows["LOWFARE-ILG-TPA"]["member_price"] == 77
+    assert rows["AVELO-ILG-TPA"]["member_price"] is None            # a public fare is not a member price
+    assert conn.execute("SELECT airline FROM scrape_runs").fetchone()["airline"] == "XP"
+    assert conn.execute("SELECT COUNT(*) FROM price_history WHERE airline = 'XP'").fetchone()[0] == 2   # seeded
+    assert "idx_flights_airline_route" in {r["name"] for r in conn.execute("PRAGMA index_list(avelo_flights)")}
+    conn.close()
+    db.get_connection(path).close()                                  # second open is a no-op, not an error
+
+
+def test_baselines_are_per_airline(conn):
+    day = [date(2026, 10, 10)]
+    xp = db.start_run("calendar", [("PHL", "MCO")], conn=conn)
+    db.record_seen(xp, "PHL", "MCO", day, [], conn)
+    db.finish_run(xp, {}, conn)
+    f9_run = db.start_run("calendar", [("PHL", "MCO")], conn=conn, airline="F9")
+    db.record_seen(f9_run, "PHL", "MCO", day, [], conn)
+    assert db.previous_run_for_route(f9_run, "PHL", "MCO", conn) is None
+    db.finish_run(f9_run, {}, conn)
+    f9_next = db.start_run("calendar", [("PHL", "MCO")], conn=conn, airline="F9")
+    assert db.previous_run_for_route(f9_next, "PHL", "MCO", conn) == f9_run
+    assert db.last_runs(1, conn)[0]["airline"] == "F9"

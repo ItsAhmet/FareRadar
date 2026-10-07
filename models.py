@@ -12,6 +12,7 @@ class Flight:
     `price` is the fare we would pay: the Avelo PLUS member fare whenever the
     site shows one (`is_member_fare=True`), otherwise the public fare.
     `base_price` keeps the public fare alongside for comparison.
+    `member_price` keeps the program fare so membership savings can be shown either way.
     """
 
     origin: str
@@ -23,6 +24,7 @@ class Flight:
     flight_number: str | None = None
     arrival_datetime: datetime | None = None
     base_price: float | None = None
+    member_price: float | None = None  # the airline's program fare (Avelo PLUS, Discount Den), when shown
     is_member_fare: bool = False
     promo_code: str | None = None  # promo applied when this fare was observed
     timestamp_scraped: datetime = field(default_factory=datetime.now)

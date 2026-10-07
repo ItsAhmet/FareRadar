@@ -521,8 +521,9 @@ def enrich(
 
 def find_itineraries(query: GetawayQuery, conn: sqlite3.Connection | None = None) -> list[Itinerary]:
     start, end = query.span
-    outbounds = query_flights(query.origins, query.destinations, start, end, conn=conn)
-    inbounds = query_flights(query.destinations, query.origins, start, end, conn=conn)
+    # Phase 3 makes the airline set part of GetawayQuery; until then packages are Avelo-only.
+    outbounds = query_flights(query.origins, query.destinations, start, end, conn=conn, airlines=["XP"])
+    inbounds = query_flights(query.destinations, query.origins, start, end, conn=conn, airlines=["XP"])
     itineraries = build_itineraries(outbounds, inbounds, query)
     if not itineraries:
         return itineraries

@@ -40,6 +40,8 @@ CREATE TABLE IF NOT EXISTS avelo_flights (
     base_price         REAL,
     is_member_fare     INTEGER NOT NULL DEFAULT 0,
     promo_code         TEXT,
+    member_price       REAL,
+    airline            TEXT    NOT NULL DEFAULT 'XP',
     timestamp_scraped  TEXT    NOT NULL,
     PRIMARY KEY (flight_id, departure_datetime)
 );
@@ -54,6 +56,7 @@ CREATE TABLE IF NOT EXISTS price_history (
     price              REAL    NOT NULL,
     base_price         REAL,
     promo_code         TEXT,
+    airline            TEXT    NOT NULL DEFAULT 'XP',
     scraped_at         TEXT    NOT NULL,
     PRIMARY KEY (flight_id, departure_datetime, scraped_at)
 );
@@ -67,6 +70,7 @@ CREATE TABLE IF NOT EXISTS scrape_runs (
     mode         TEXT    NOT NULL,
     routes       TEXT    NOT NULL,   -- JSON list of "ORG-DST"
     promo_code   TEXT,
+    airline      TEXT    NOT NULL DEFAULT 'XP',
     summary      TEXT               -- JSON report
 );
 
@@ -150,13 +154,17 @@ MIGRATIONS: dict[tuple[str, str], str] = {
     ("avelo_flights", "is_member_fare"): "ALTER TABLE avelo_flights ADD COLUMN is_member_fare INTEGER NOT NULL DEFAULT 0",
     ("avelo_flights", "promo_code"): "ALTER TABLE avelo_flights ADD COLUMN promo_code TEXT",
     ("scrape_runs", "status"): "ALTER TABLE scrape_runs ADD COLUMN status TEXT",  # ok | partial | failed
+    ("avelo_flights", "airline"): "ALTER TABLE avelo_flights ADD COLUMN airline TEXT NOT NULL DEFAULT 'XP'",
+    ("avelo_flights", "member_price"): "ALTER TABLE avelo_flights ADD COLUMN member_price REAL",
+    ("price_history", "airline"): "ALTER TABLE price_history ADD COLUMN airline TEXT NOT NULL DEFAULT 'XP'",
+    ("scrape_runs", "airline"): "ALTER TABLE scrape_runs ADD COLUMN airline TEXT NOT NULL DEFAULT 'XP'",
 }
 
 UPSERT_SQL = """
 INSERT INTO avelo_flights (
     flight_id, origin, destination, departure_datetime, arrival_datetime,
-    price, currency, duration_minutes, flight_number, base_price, is_member_fare, promo_code, timestamp_scraped
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    price, currency, duration_minutes, flight_number, base_price, is_member_fare, promo_code, member_price, airline, timestamp_scraped
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (flight_id, departure_datetime) DO UPDATE SET
     price             = excluded.price,
     currency          = excluded.currency,
@@ -166,13 +174,15 @@ ON CONFLICT (flight_id, departure_datetime) DO UPDATE SET
     base_price        = COALESCE(excluded.base_price, avelo_flights.base_price),
     is_member_fare    = excluded.is_member_fare,
     promo_code        = excluded.promo_code,
+    member_price      = COALESCE(excluded.member_price, avelo_flights.member_price),
+    airline           = excluded.airline,
     timestamp_scraped = excluded.timestamp_scraped;
 """
 
 HISTORY_SQL = """
 INSERT OR IGNORE INTO price_history
-    (flight_id, origin, destination, departure_datetime, price, base_price, promo_code, scraped_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    (flight_id, origin, destination, departure_datetime, price, base_price, promo_code, airline, scraped_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
@@ -193,11 +203,17 @@ def _migrate(conn: sqlite3.Connection) -> None:
         if column not in columns[table]:
             conn.execute(ddl)
             columns[table].add(column)
+    # Indexes on migrated columns live here: SCHEMA runs before the columns exist on an old database.
+    conn.execute("""CREATE INDEX IF NOT EXISTS idx_flights_airline_route
+                    ON avelo_flights (airline, origin, destination, departure_datetime)""")
+    # Rows written before member_price existed: a member fare was stored as `price`.
+    conn.execute("UPDATE avelo_flights SET member_price = price WHERE member_price IS NULL AND is_member_fare = 1")
     # Seed history from current fares so trends have a starting point.
     if conn.execute("SELECT COUNT(*) FROM price_history").fetchone()[0] == 0:
         conn.execute(
             """INSERT OR IGNORE INTO price_history
-               SELECT flight_id, origin, destination, departure_datetime, price, base_price, promo_code, timestamp_scraped
+                   (flight_id, origin, destination, departure_datetime, price, base_price, promo_code, airline, scraped_at)
+               SELECT flight_id, origin, destination, departure_datetime, price, base_price, promo_code, airline, timestamp_scraped
                FROM avelo_flights"""
         )
     conn.commit()
@@ -275,6 +291,8 @@ def _to_row(f: Flight) -> tuple:
         float(f.base_price) if f.base_price is not None else None,
         1 if f.is_member_fare else 0,
         f.promo_code,
+        float(f.member_price) if f.member_price is not None else None,
+        f.airline,
         f.timestamp_scraped.isoformat(timespec="seconds"),
     )
 
@@ -288,6 +306,7 @@ def _to_history_row(f: Flight) -> tuple:
         float(f.price),
         float(f.base_price) if f.base_price is not None else None,
         f.promo_code,
+        f.airline,
         f.timestamp_scraped.isoformat(timespec="seconds"),
     )
 
@@ -398,6 +417,8 @@ def _from_row(row: sqlite3.Row) -> Flight:
         base_price=row["base_price"],
         is_member_fare=bool(row["is_member_fare"]),
         promo_code=row["promo_code"],
+        member_price=row["member_price"],
+        airline=row["airline"],
         timestamp_scraped=datetime.fromisoformat(row["timestamp_scraped"]),
     )
 
@@ -409,6 +430,7 @@ def query_flights(
     end_date: date,
     max_price: float | None = None,
     conn: sqlite3.Connection | None = None,
+    airlines: Iterable[str] | None = None,
 ) -> list[Flight]:
     """All flights from any `origins` to any `destinations` departing within
     [start_date, end_date] inclusive, cheapest first."""
@@ -423,6 +445,12 @@ def query_flights(
           AND destination IN ({_placeholders(destinations)})
           AND departure_datetime >= ? AND departure_datetime < ?
     """
+    if airlines is not None:
+        codes = [a.upper() for a in airlines]
+        if not codes:
+            return []
+        sql += f" AND airline IN ({_placeholders(codes)})"
+        params.extend(codes)
     if max_price is not None:
         sql += " AND price <= ?"
         params.append(max_price)
@@ -577,15 +605,15 @@ def _now(now: datetime | None = None) -> str:
 
 
 def start_run(mode: str, routes: Iterable[tuple[str, str]], promo_code: str | None = None,
-              conn: sqlite3.Connection | None = None, now: datetime | None = None) -> int:
+              conn: sqlite3.Connection | None = None, now: datetime | None = None, airline: str = "XP") -> int:
     routes_json = json.dumps([f"{o}-{d}" for o, d in routes])
-    sql = "INSERT INTO scrape_runs (started_at, mode, routes, promo_code) VALUES (?, ?, ?, ?)"
+    sql = "INSERT INTO scrape_runs (started_at, mode, routes, promo_code, airline) VALUES (?, ?, ?, ?, ?)"
     if conn is not None:
-        cur = conn.execute(sql, (_now(now), mode, routes_json, promo_code))
+        cur = conn.execute(sql, (_now(now), mode, routes_json, promo_code, airline.upper()))
         conn.commit()
         return int(cur.lastrowid)
     with connection() as own:
-        return int(own.execute(sql, (_now(now), mode, routes_json, promo_code)).lastrowid)
+        return int(own.execute(sql, (_now(now), mode, routes_json, promo_code, airline.upper())).lastrowid)
 
 
 def finish_run(run_id: int, summary: dict | None = None, conn: sqlite3.Connection | None = None,
@@ -640,8 +668,9 @@ def previous_run_for_route(run_id: int, origin: str, destination: str, conn: sql
         """SELECT MAX(s.run_id) AS prev FROM route_day_seen s
            JOIN scrape_runs r ON r.run_id = s.run_id
            WHERE s.run_id < ? AND s.origin = ? AND s.destination = ?
-             AND r.finished_at IS NOT NULL AND COALESCE(r.status, 'ok') = 'ok'""",
-        (run_id, origin.upper(), destination.upper()), conn)
+             AND r.finished_at IS NOT NULL AND COALESCE(r.status, 'ok') = 'ok'
+             AND r.airline = (SELECT airline FROM scrape_runs WHERE run_id = ?)""",
+        (run_id, origin.upper(), destination.upper(), run_id), conn)
     return rows[0]["prev"] if rows and rows[0]["prev"] is not None else None
 
 

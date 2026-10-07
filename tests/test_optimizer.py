@@ -347,3 +347,15 @@ def test_clear_drives_restores_the_default_rate_and_drops_drives():
     assert it.drive_value_per_hour == DEFAULT_DRIVE_VALUE_PER_HOUR
     assert it.home_side_cost == default_home_side
     assert it.parking_cost == 51.0 and it.home_drive_min == 80   # home-side data is not touched
+
+
+def test_packages_use_avelo_rows_only_until_phase_3():
+    conn = db.get_connection(":memory:")
+    out_f9 = Flight(origin="PHL", destination="TPA", departure_datetime=datetime(2026, 10, 8, 9), price=60,
+                    duration_minutes=150, airline="F9", flight_id="F9-1-PHL-TPA")
+    back_f9 = Flight(origin="TPA", destination="PHL", departure_datetime=datetime(2026, 10, 11, 16), price=60,
+                     duration_minutes=150, airline="F9", flight_id="F9-2-TPA-PHL")
+    db.upsert_flights([out_f9, back_f9, f("ILG", "TPA", 8, hour=8), f("TPA", "ILG", 11, hour=15)], conn)
+    its = find_itineraries(q(origins=["ILG", "PHL"]), conn=conn)
+    assert {i.outbound.airline for i in its} == {"XP"} and len(its) == 1
+    conn.close()
