@@ -250,3 +250,10 @@ def test_payload_updates(conn):
     bid = db.add_booking("b", {"out_trip": "a"}, 100, conn=conn)
     db.update_booking_payload(bid, {"out_trip": "c"}, conn)
     assert db.list_bookings(conn)[0]["payload"] == {"out_trip": "c"}
+
+
+def test_trip_candidates_list_every_flight_a_key_may_mean(conn):
+    db.upsert_flights([flight(day=10, hour=8, price=95, number="XP1"), flight(day=10, hour=18, price=85, number="XP2")], conn)
+    assert [f.departure_datetime.hour for f in db.trip_candidates("XP|ILG|TPA|2026-10-10|*", conn)] == [18, 8]
+    assert [f.price for f in db.trip_candidates("XP|ILG|TPA|2026-10-10|08:00", conn)] == [95]
+    assert db.trip_candidates("XP|ILG|TPA|2026-10-11|*", conn) == []

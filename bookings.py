@@ -49,12 +49,11 @@ def fare_savings(payload: dict) -> float:
 
 
 def legs(payload: dict, conn: sqlite3.Connection | None = None) -> tuple[Flight | None, Flight | None]:
-    """(outbound, inbound) flights the booking refers to now; None for a missing leg."""
-    found = []
-    for leg in ("out", "in"):
-        k = trips.payload_trip(payload, leg)
-        found.append(database.find_trip(k, conn) if k else None)
-    return found[0], found[1]
+    """(outbound, inbound) flights the booking refers to now; None for a leg with
+    no flight that fits the booked window (see `alerts.package_legs`)."""
+    from alerts import package_legs  # local import, as in booking_payload
+
+    return package_legs(payload, conn)
 
 
 def current_total(payload: dict, conn: sqlite3.Connection | None = None) -> float | None:

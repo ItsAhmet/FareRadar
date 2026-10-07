@@ -25,7 +25,9 @@ from email.message import EmailMessage
 import config
 import database
 import trips
-from optimizer import Availability, GetawayQuery, Itinerary, find_itineraries, rank_by_price
+from models import Flight
+from optimizer import (Availability, GetawayQuery, Itinerary, Window, find_itineraries, inbound_fits,
+                       outbound_fits, rank_by_price)
 from netutil import open_url
 from signals import Event
 
@@ -140,13 +142,46 @@ def watch_package(it: Itinerary, conn: sqlite3.Connection | None = None) -> tupl
 # --------------------------------------------------------------------------- #
 
 
+def _day_only(key: str | None) -> bool:
+    return key is not None and trips.parse(key).time == trips.ANY_TIME
+
+
+def _payload_window(payload: dict) -> Window:
+    """The free window a package was built for; a bound the payload lacks stays open."""
+    start, end = payload.get("window_start"), payload.get("window_end")
+    return Window(datetime.fromisoformat(start) if start else datetime.min,
+                  datetime.fromisoformat(end) if end else datetime.max)
+
+
+def package_legs(payload: dict, conn: sqlite3.Connection | None = None) -> tuple[Flight | None, Flight | None]:
+    """(outbound, inbound) a watched or booked package refers to now.
+
+    A timed leg is that exact flight. A day-only leg (saved from a calendar
+    run) only resolves to a flight that still fits the package's window by the
+    optimizer's own test: the outbound leaves once the window opens, the return
+    leaves after the outbound lands and is home before the window ends. The
+    cheapest fitting pair wins. With no fitting pair the inbound is None (and
+    the outbound too if none of its flights fits), so the package reads as
+    unavailable instead of following a flight the owner cannot take.
+    """
+    out_k, in_k = trips.payload_trip(payload, "out"), trips.payload_trip(payload, "in")
+    outs = database.trip_candidates(out_k, conn) if out_k else []
+    backs = database.trip_candidates(in_k, conn) if in_k else []
+    window = _payload_window(payload)
+    if _day_only(out_k):
+        outs = [o for o in outs if outbound_fits(o, window)]
+    pairs = [(o, b) for o in outs for b in backs if not _day_only(in_k) or inbound_fits(b, o, window)]
+    if pairs:
+        return min(pairs, key=lambda pair: pair[0].price + pair[1].price)
+    return (outs[0] if outs else None), None
+
+
 def evaluate_packages(conn: sqlite3.Connection | None = None) -> list[Event]:
     events: list[Event] = []
     for watch in database.list_watches("package", conn):
         key, state = watch["payload"], dict(watch["state"])
         out_k, in_k = trips.payload_trip(key, "out"), trips.payload_trip(key, "in")
-        out = database.find_trip(out_k, conn) if out_k else None
-        back = database.find_trip(in_k, conn) if in_k else None
+        out, back = package_legs(key, conn)
         if out is None or back is None:
             if not state.get("unavailable"):
                 events.append(Event("watch_unavailable", None, key.get("destination"), None,

@@ -643,20 +643,30 @@ def get_flight(flight_id: str, departure_datetime: datetime, conn: sqlite3.Conne
     return _from_row(rows[0]) if rows else None
 
 
-def find_trip(key: str, conn: sqlite3.Connection | None = None) -> Flight | None:
-    """The flight a trip key refers to right now.
+def trip_candidates(key: str, conn: sqlite3.Connection | None = None) -> list[Flight]:
+    """Every flight a trip key may refer to right now, cheapest first.
 
-    Timed key → the flight departing at exactly that time. Day-only key → the
-    cheapest timed flight that day if a detail run has seen the day, else the
-    calendar row.
+    Timed key → the flight departing at exactly that time. Day-only key → that
+    day's timed flights if a detail run has seen the day, else the calendar row.
+    A caller that knows more (a package's window) picks among them; see
+    `alerts.package_legs`.
     """
     k = trips.parse(key)
     same_day = [f for f in query_flights([k.origin], [k.destination], k.day, k.day, conn=conn) if f.airline == k.airline]
     if k.time != trips.ANY_TIME:
-        return next((f for f in same_day if f.time_known and f.departure_datetime.strftime("%H:%M") == k.time), None)
-    timed = [f for f in same_day if f.time_known]
-    pool = timed or same_day
-    return pool[0] if pool else None
+        return [f for f in same_day if f.time_known and f.departure_datetime.strftime("%H:%M") == k.time]
+    return [f for f in same_day if f.time_known] or same_day
+
+
+def find_trip(key: str, conn: sqlite3.Connection | None = None) -> Flight | None:
+    """The flight a trip key refers to right now: the cheapest of `trip_candidates`.
+
+    Knows nothing about windows, so for a day-only key it may return a flight a
+    package cannot use; package watches and bookings resolve through
+    `alerts.package_legs` instead.
+    """
+    found = trip_candidates(key, conn)
+    return found[0] if found else None
 
 
 # --------------------------------------------------------------------------- #

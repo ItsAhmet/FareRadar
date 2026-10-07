@@ -78,3 +78,20 @@ def test_booking_follows_its_trip_through_a_detail_upgrade(conn):
     assert b["state"]["current_total"] == 140.0
     assert b["payload"]["out_trip"] == "XP|ILG|TPA|2026-10-08|19:00"
     assert [e.kind for e in events] == ["booked_drop"]
+
+
+def test_booking_ignores_cheaper_flights_outside_its_window(conn):
+    out = Flight(origin="ILG", destination="TPA", departure_datetime=datetime(2026, 10, 7), price=100, flight_id="LOWFARE-ILG-TPA")
+    back = Flight(origin="TPA", destination="ILG", departure_datetime=datetime(2026, 10, 11), price=80, flight_id="LOWFARE-TPA-ILG")
+    db.upsert_flights([out, back], conn)
+    (it,) = build_itineraries([out], [back], GetawayQuery({"TPA"}, [Window(datetime(2026, 10, 7, 18), datetime(2026, 10, 11, 23, 59))], origins=["ILG"]))
+    db.add_booking("trip", bookings.booking_payload(it), 180.0, conn=conn)
+    db.delete_day("ILG", "TPA", date(2026, 10, 7), conn=conn)
+    # 07:00 is cheaper but leaves before the window opens at 18:00; only 19:00 is bookable
+    evening = Flight(origin="ILG", destination="TPA", departure_datetime=datetime(2026, 10, 7, 19), price=100,
+                     duration_minutes=150, flight_id="AVELO-ILG-TPA-PM")
+    db.upsert_flights([f("ILG", "TPA", 7, 7, 60, 90), evening], conn)
+    assert bookings.evaluate_bookings(conn) == []                  # no false "consider rebooking"
+    b = db.list_bookings(conn)[0]
+    assert b["state"]["current_total"] == 180.0
+    assert b["payload"]["out_trip"] == "XP|ILG|TPA|2026-10-07|19:00"

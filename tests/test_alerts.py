@@ -202,3 +202,48 @@ def test_rule_match_quotes_the_cheapest_flight_of_the_day(conn):
     db.add_watch("rule", "Tampa", payload, conn)
     events = alerts.evaluate_rules(conn, today=date(2026, 10, 1))
     assert [e.kind for e in events] == ["rule_match"] and events[0].message.endswith("for $180")
+
+
+def _calendar_watch(conn, out_day=7, out_price=100, back_price=80):
+    """Watch a calendar-only package (both legs day-only), then return its id."""
+    out, back = cal("ILG", "TPA", out_day, out_price), cal("TPA", "ILG", 11, back_price)
+    db.upsert_flights([out, back], conn)
+    (it,) = build_itineraries([out], [back], GetawayQuery({"TPA"}, [WINDOW], origins=["ILG"]))
+    wid, _ = alerts.watch_package(it, conn)
+    return wid
+
+
+def test_day_only_watch_follows_only_flights_that_fit_its_window(conn):
+    # Wed Oct 7 is the window's first day (opens 18:00). The detail run finds a
+    # cheaper 07:00 the owner cannot take and a 19:00 that fits.
+    _calendar_watch(conn)
+    db.delete_day("ILG", "TPA", date(2026, 10, 7), conn=conn)
+    db.upsert_flights([f("ILG", "TPA", 7, 7, 60, "AVELO-ILG-TPA-AM"), f("ILG", "TPA", 7, 19, 100, "AVELO-ILG-TPA-PM")], conn)
+    assert alerts.evaluate_packages(conn) == []                    # no false $40 drop
+    assert db.list_watches("package", conn)[0]["payload"]["out_trip"] == "XP|ILG|TPA|2026-10-07|19:00"
+    # the untakeable 07:00 selling out changes nothing
+    conn.execute("DELETE FROM avelo_flights WHERE flight_id = 'AVELO-ILG-TPA-AM'")
+    conn.commit()
+    assert alerts.evaluate_packages(conn) == []
+
+
+def test_day_only_watch_return_must_be_home_before_the_window_ends(conn):
+    _calendar_watch(conn, out_day=8)
+    db.delete_day("TPA", "ILG", date(2026, 10, 11), conn=conn)
+    # 22:00 + 150 min lands 00:30 Monday, after the window's Sunday 23:59 end
+    db.upsert_flights([f("TPA", "ILG", 11, 15, 80, "AVELO-TPA-ILG-PM"), f("TPA", "ILG", 11, 22, 50, "AVELO-TPA-ILG-LATE")], conn)
+    assert alerts.evaluate_packages(conn) == []
+    assert db.list_watches("package", conn)[0]["payload"]["in_trip"] == "XP|TPA|ILG|2026-10-11|15:00"
+
+
+def test_day_only_watch_with_no_fitting_flight_is_unavailable_not_pinned(conn):
+    wid = _calendar_watch(conn)
+    db.update_watch_state(wid, {"last_total": 180.0}, conn)
+    db.delete_day("ILG", "TPA", date(2026, 10, 7), conn=conn)
+    db.upsert_flights([f("ILG", "TPA", 7, 7, 70)], conn)           # the day's only flight leaves before 18:00
+    assert [e.kind for e in alerts.evaluate_packages(conn)] == ["watch_unavailable"]
+    assert db.list_watches("package", conn)[0]["payload"]["out_trip"] == "XP|ILG|TPA|2026-10-07|*"
+    # still day-only, so a fitting flight added later brings the watch back
+    db.upsert_flights([f("ILG", "TPA", 7, 20, 100, "AVELO-ILG-TPA-PM")], conn)
+    assert alerts.evaluate_packages(conn) == []
+    assert db.list_watches("package", conn)[0]["payload"]["out_trip"] == "XP|ILG|TPA|2026-10-07|20:00"
