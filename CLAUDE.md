@@ -87,7 +87,8 @@ geocoding, routing, pushes); tests set `config.OFFLINE` via monkeypatch.
   page then shows "There are no flights available for the selected date. Please select a
   different date." and no cards (seen Sep 2 2026, SRQ→HVN Sep 7). `scrape_day` waits for a card
   *or* that text and raises `DateUnavailable` for the latter; `_pick_date` raises it only when the
-  picker rendered other days. A picker with no selectable day at all is a `ScrapeError` (retry).
+  picker rendered other days **of the wanted month**. A picker with no selectable day at all, or one
+  not showing the wanted month (no next-month paging yet), is a `ScrapeError` (retry; stored fares kept).
 - Stealth: one UA/viewport per run, cookies persisted to `data/browser_state.json`
   (**cookies only** — persisting localStorage stops the app re-fetching routes/all),
   webdriver masked, trackers/images blocked, human pauses.

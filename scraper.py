@@ -592,6 +592,12 @@ class AveloScraper:
                 # Not one selectable day: the picker did not render. That is a failure to retry, not an
                 # answer, and must not clear this day's stored fares as if it had sold out.
                 raise ScrapeError(f"date picker showed no selectable days (wanted {day})") from exc
+            # Only a missing cell inside the wanted month says anything about that day. If the picker is showing
+            # another month (a detail run spanning October and November opens on October), the day is simply
+            # off screen: that is a failure to retry, never a sell-out that would clear its stored fares.
+            month = page.locator(f"td[aria-label*='{day:%B} '][aria-label$=', {day.year}']").filter(visible=True)
+            if not await month.count():
+                raise ScrapeError(f"date picker is not showing {day:%B %Y} (wanted {day})") from exc
             raise DateUnavailable(f"no selectable calendar cell for {day} (not flown)") from exc
         await cell.click()
 

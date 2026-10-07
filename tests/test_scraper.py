@@ -248,14 +248,20 @@ def test_sold_out_answer_clears_the_day_and_records_none():
 
 
 class FakePickerPage:
-    """The date picker: `labels` are the aria-labels of the selectable cells it rendered."""
+    """The date picker: `labels` are the aria-labels of the selectable cells it rendered, `disabled` those of
+    the greyed-out cells. `td.selectable[...]` sees only the selectable ones; a bare `td[...]` sees both."""
 
-    def __init__(self, labels):
-        self.labels, self.clicked = labels, []
+    def __init__(self, labels, disabled=()):
+        self.labels, self.disabled, self.clicked = list(labels), list(disabled), []
 
     def locator(self, selector):
         page = self
-        wanted = re.search(r"aria-label\$='(.+)'\]$", selector)
+        tests = re.findall(r"\[aria-label([$*^]?)='([^']*)'\]", selector)
+        pool = page.labels if selector.startswith("td.selectable") else page.labels + page.disabled
+        ops = {"$": str.endswith, "*": str.__contains__, "^": str.startswith, "": str.__eq__}
+
+        def matches():
+            return [label for label in pool if all(ops[op](label, value) for op, value in tests)]
 
         class Loc:
             @property
@@ -266,24 +272,25 @@ class FakePickerPage:
                 return self
 
             async def count(self):
-                if wanted:
-                    return int(any(label.endswith(wanted.group(1)) for label in page.labels))
-                return len(page.labels)
+                return len(matches())
 
             async def wait_for(self, **_k):
                 if not await self.count():
                     raise PlaywrightTimeout("cell never became visible")
 
             async def click(self):
-                page.clicked.append(wanted.group(1) if wanted else "date button")
+                page.clicked.append(tests[0][1] if tests else "date button")
 
         return Loc()
 
 
-def _picker_scraper(labels):
+def _picker_scraper(labels, disabled=()):
     s = AveloScraper(screenshots=False)
-    s._page = FakePickerPage(labels)
+    s._page = FakePickerPage(labels, disabled)
     return s
+
+
+OCTOBER_PICKER = [f"{date(2026, 10, d):%A}, October {d}, 2026" for d in range(1, 21)]
 
 
 def test_pick_date_clicks_the_selectable_cell():
@@ -296,6 +303,28 @@ def test_pick_date_missing_cell_in_a_rendered_picker_is_date_unavailable():
     s = _picker_scraper(["Tuesday, October 13, 2026"])
     with pytest.raises(DateUnavailable):
         asyncio.run(s._pick_date(date(2026, 10, 12)))
+
+
+def test_pick_date_missing_cell_beside_a_disabled_cell_of_its_month_is_date_unavailable():
+    s = _picker_scraper(OCTOBER_PICKER, disabled=["Monday, November 2, 2026", "Tuesday, November 3, 2026"])
+    with pytest.raises(DateUnavailable):
+        asyncio.run(s._pick_date(date(2026, 11, 4)))
+
+
+def test_pick_date_in_a_month_the_picker_is_not_showing_is_a_failure_not_a_sold_out_day():
+    # The picker opened on October; November 2 is scheduled but simply off screen. Calling that sold out would
+    # make the run loop clear the day's stored fares and record a no-fare sighting (a false sold_out event).
+    s = _picker_scraper(OCTOBER_PICKER)
+    with pytest.raises(ScrapeError, match="not showing November 2026") as err:
+        asyncio.run(s._pick_date(date(2026, 11, 2)))
+    assert not isinstance(err.value, DateUnavailable)
+
+
+def test_pick_date_same_month_name_in_another_year_does_not_count_as_shown():
+    s = _picker_scraper([f"Friday, November {d}, 2027" for d in (5, 6)])
+    with pytest.raises(ScrapeError) as err:
+        asyncio.run(s._pick_date(date(2026, 11, 2)))
+    assert not isinstance(err.value, DateUnavailable)
 
 
 def test_pick_date_picker_that_never_rendered_is_a_failure_not_a_sold_out_day():
