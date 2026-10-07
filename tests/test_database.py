@@ -557,3 +557,18 @@ def test_annotate_run_merges_into_the_summary_only(conn):
     assert after["summary"] == {"flights_written": 3, "alerts": {"pushed": 1}}
     assert (after["status"], after["finished_at"]) == (before["status"], before["finished_at"])
     db.annotate_run(999, {"x": 1}, conn)  # unknown run: no error, nothing written
+
+
+def test_tests_cannot_open_the_owners_database(_no_real_database, tmp_path, monkeypatch):
+    """Root conftest guard: the default path and data/flights.db are refused before sqlite opens them."""
+    real = config.PROJECT_ROOT / "data" / "flights.db"
+    for attempt in (db.get_connection, db.init_db, lambda: db.last_runs(1), lambda: db.get_connection(real),
+                    lambda: db.start_run("calendar", [("PHL", "MCO")], airline="F9")):
+        with pytest.raises(RuntimeError, match="real database"):
+            attempt()
+    assert len(_no_real_database) == 5
+    _no_real_database.clear()                       # expected here; otherwise the guard fails the test at teardown
+    monkeypatch.setattr(db, "DB_PATH", tmp_path / "f.db")
+    db.init_db()                                    # a test database and :memory: still open
+    db.get_connection(":memory:").close()
+    assert _no_real_database == []

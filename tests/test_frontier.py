@@ -505,3 +505,11 @@ def test_calendar_answered_by_the_bot_wall_stops_the_run(f9db, monkeypatch, body
 
 async def _no_wait(*_a, **_k):
     return None
+
+
+def test_scraper_helper_without_a_test_database_never_reaches_the_real_one(_no_real_database, monkeypatch):
+    """scraper_with() starts a run row; without f9db that used to open (and migrate) data/flights.db."""
+    with pytest.raises(RuntimeError, match="real database"):
+        scraper_with(monkeypatch, "calendar")
+    assert _no_real_database and _no_real_database[0].endswith("flights.db")
+    _no_real_database.clear()
