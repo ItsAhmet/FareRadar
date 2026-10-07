@@ -45,7 +45,7 @@ source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 playwright install chromium        # one-time browser download (~100 MB)
 cp .env.example .env               # optional: tweak headless mode, DB path, etc.
-pytest -q                          # 285 tests, no network needed
+pytest -q                          # 352 tests, no network needed
 ```
 
 The project lives in `~/avelo-finder`, outside iCloud-synced folders. To start
@@ -66,7 +66,7 @@ and the scraper visits only ILG⇄TPA and ILG⇄LAL on days Avelo actually flies
 them (it captures Avelo's own schedule feed first and intersects). Routes with
 no flight in the span are reported as skipped.
 
-### Frontier (experimental)
+### Frontier
 
 Frontier Airlines can be scraped alongside Avelo. It is off by default; opt in per run or in `.env`:
 
@@ -79,12 +79,17 @@ AVELO_AIRLINES=XP,F9                                              # in .env: the
 The nightly job (`run_scraper.py --from-rules`) takes its targets from saved rules, watches and bookings, but only
 for airlines listed in `AVELO_AIRLINES`: a rule that names Frontier does not scrape Frontier until you opt in there.
 
-Frontier fares are **stored but not yet shown in the product**: packages, watch rules and the fare calendar read
-Avelo rows only until Phase 3, and signal detection (so alerts, pushes and the dashboard's signal feed) skips
-Frontier runs. Frontier data does still appear in two dashboard places that are not airline-aware yet: the
-freshness table and the "N fares on M routes" selection counts. Only nonstop Frontier flights are kept. Each
-airline gets its own scrape run, so baselines compare like with like. Frontier's public route page lists only about 20 of ~30 destinations per home airport, so
-for a route that is not listed pass it with `--routes`.
+Frontier fares are shown next to Avelo's: packages mix airlines (fly out on one, back on the other) with each leg
+labelled, the fare calendar and the freshness table read both, and every airline's runs raise their own signals, floors and
+alerts (a Frontier sale never moves Avelo's floor or raises an "Avelo sale"). A rule saved before Frontier existed stays
+Avelo-only. Only nonstop Frontier flights are kept. Each airline gets its own scrape run, so baselines compare like with
+like. Carry-on bags are estimated per leg (`AVELO_CARRY_ON_XP`, `AVELO_CARRY_ON_F9`) and counted only when a query asks;
+Avelo PLUS perks apply to Avelo legs only, and a package shows what a membership would save on legs you pay the public
+fare on.
+
+Known limits: Frontier's public route page lists only about 20 of ~30 destinations per home airport, so for a route that
+is not listed pass it with `--routes`. The dashboard has no controls yet for airlines, open-jaw returns, carry-on or
+memberships (planned for Phase 4).
 
 Other useful invocations:
 
@@ -126,7 +131,7 @@ versions are migrated in place (columns added on open); rescrape to fill them.
 Scheduling: any cron/launchd entry works, e.g. nightly at 03:00:
 
 ```
-0 3 * * * cd /path/to/avelo-finder && .venv/bin/python run_scraper.py --purge >> data/scrape.log 2>&1
+0 3 * * * cd /path/to/avelo-finder && .venv/bin/python run_scraper.py --from-rules >> data/scrape.log 2>&1
 ```
 
 ### Scraper behaviour, stealth and tuning
@@ -153,7 +158,7 @@ Scheduling: any cron/launchd entry works, e.g. nightly at 03:00:
 ## Watching fares for you
 
 Every scrape is recorded as a run, with the lowest fare seen per route-day
-(or "not selectable"). Comparing consecutive runs of a route yields signals:
+(or "not selectable"). Comparing consecutive runs of a route, per airline, yields signals:
 
 | Signal | Meaning |
 |---|---|
@@ -169,15 +174,20 @@ filters as an alert rule** stores the current destinations, free window,
 nights, budget and pairing rules; after each run you're told about packages
 that newly match. Route signals are pushed only for routes some watch cares
 about; everything lands in the *Watchlist & alerts* tab (unread count in the
-title).
+title). Watches and booked trips compare on fares only (a carry-on estimate never counts as a price change), and a
+membership change raises no alert. Route signals are pushed only for the airline you watch, and their titles name it.
 
 **Delivery.** Set `AVELO_NTFY_TOPIC` in `.env` to an unguessable topic name
 and subscribe to it in the ntfy app (iOS/Android/desktop). Optional email via
-`AVELO_SMTP_*`. `run_scraper.py --no-alerts` skips detection and pushes.
+`AVELO_SMTP_*`. `run_scraper.py --no-alerts` skips detection and pushes. A watch or booking alert is recorded only after its push is
+delivered, so if ntfy is down the same drop is announced on the next run; with no push channel (or `AVELO_OFFLINE=1`)
+the in-app feed is the delivery.
 
 **Nightly job.** The *⏰ Nightly scrape* sidebar panel installs a launchd
-agent (macOS) that runs the scraper at the chosen time for the union of your
-saved rules' destinations and spans; on other systems it prints the cron
+agent (macOS) that runs `run_scraper.py --from-rules` at the chosen time; the
+targets (destinations, origins, spans, airlines) are read from your saved rules,
+watches and bookings when it runs, capped by `AVELO_AIRLINES`. Stored airport codes
+the scraper does not know are skipped with a warning. On other systems it prints the cron
 line. Output goes to `data/scheduled.log`.
 
 Demo the signals without the network:
@@ -301,7 +311,7 @@ Primary key is `(flight_id, departure_datetime)`; re-scraping upserts the
 price and timestamp, so the table always holds the freshest fare per flight.
 
 New tables: `scrape_runs`, `route_day_seen` (what each run saw),
-`route_floor`, `events` (signals and alerts, with read state), `watchlist`,
+`route_floor` (one floor per airline and route), `events` (signals and alerts, with read state and airline), `watchlist`,
 `places` and `drive_times` (place-mode cache), `bookings`, `route_catalog` (which
 airline flies which route, with a nonstop flag).
 

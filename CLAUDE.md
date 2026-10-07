@@ -1,7 +1,7 @@
 # CLAUDE.md — Avelo Finder
 
 Personal getaway finder for Avelo Airlines nonstops from **Wilmington, DE (ILG)**.
-Scrapes Avelo PLUS member fares into SQLite, builds mix-and-match weekend
+Scrapes Avelo PLUS member fares (and Frontier fares) into SQLite, builds mix-and-match weekend
 packages that fit a weekly free window, watches fares nightly, pushes alerts,
 and hands off to Avelo's site for booking. Single user (the owner is an Avelo
 PLUS member). Python 3.13, Streamlit, Playwright, SQLite. Git repo: `main` is the
@@ -18,14 +18,16 @@ Desktop: iCloud "Optimize Mac Storage" evicted ~20k `.venv` files (`ls -lO` show
 ```bash
 cd ~/avelo-finder
 source .venv/bin/activate            # venv already built; playwright chromium installed
-pytest -q                            # 285 tests, no network; AppTest boots the dashboard
+pytest -q                            # tests, no network; AppTest boots the dashboard (352 passed)
 streamlit run app.py                 # dashboard (nothing scrapes on load)
 python launch.py [--detach|--stop]   # start if needed + open browser; ~/Desktop/Avelo Finder.command calls it
 python run_scraper.py --destinations TPA,LAL --start 2026-10-01 --end 2026-10-14   # targeted live scrape
 python run_scraper.py --mock         # synthetic data; --mock-sale 0.25 simulates a sale
-python run_scraper.py --airlines F9 --origins PHL --destinations MCO --days 21 --mode full   # Frontier (stored; not in packages or signals yet)
+python run_scraper.py --airlines F9 --origins PHL --destinations MCO --days 21 --mode full   # Frontier (shown in packages, signals and alerts)
+python run_scraper.py --from-rules   # what the nightly job runs: targets come from saved rules, watches and bookings
 python run_scraper.py --airlines XP,F9 --routes ILG-TPA,PHL-MCO   # each airline gets only the routes it could fly
-python handoff.py --legs ILG-TPA:2026-10-09,TPA-ILG:2026-10-12   # visible browser, stops at results
+python handoff.py --legs ILG-TPA:2026-10-09,TPA-ILG:2026-10-12   # visible browser, stops at results (airline defaults to XP)
+python handoff.py --legs ILG-MCO:2026-10-09:F9,MCO-ILG:2026-10-12:F9   # Frontier legs open its results page in the default browser
 ```
 
 Settings live in `.env` (git-ignored; `.env.example` documents every key).
@@ -34,7 +36,9 @@ change it unless asked. `AVELO_OFFLINE=1` disables all network calls (weather,
 geocoding, routing, pushes); tests set `config.OFFLINE` via monkeypatch.
 `AVELO_AIRLINES` (default `XP`) picks the airlines a scrape covers when `--airlines` is not given;
 `XP,F9` opts in to Frontier. `--from-rules` (the nightly job) is capped by it too: rules and watches never add an
-airline it leaves out, and stored airport codes the scraper does not know are skipped with a warning.
+airline it leaves out, and stored airport codes the scraper does not know are skipped with a warning. So Frontier
+rules, watches and bookings are refreshed nightly only after the owner sets `AVELO_AIRLINES=XP,F9`.
+`AVELO_CARRY_ON_XP` / `AVELO_CARRY_ON_F9` (default 0 / 55) are the carry-on fee estimates in `config.CARRY_ON_FEE`.
 
 A root `conftest.py` plus `pytest.ini` make any test that opens the owner's database (`data/flights.db`, or
 whatever `AVELO_DB_PATH` names) fail. `pytest.ini` pins pytest's rootdir so the guard loads from any working
@@ -54,18 +58,18 @@ directory; keep both files. A scratch `AVELO_DB_PATH` for a test run may have an
 | `models.py` | `Flight` frozen dataclass (price = member fare, `base_price` = public, `time_known`) |
 | `database.py` | SQLite schema + in-place migrations; flights (+ `airline`, `member_price`), price_history (+ `airline`), `route_catalog` (who flies what, with a nonstop flag), memberships (`settings`, default XP yes / F9 no; `price` follows `airlines.owner_price`),  scrape_runs (+ `airline`, one run per airline; + `status` ok/partial/failed; only finished `ok` runs, or legacy NULL-status ones, are signal baselines), route_day_seen, route_floor, events, watchlist, bookings, places, drive_times, settings (JSON key/value; `home_costs` = per-home-airport drive minutes + parking/day, via `set_home_cost`) |
 | `scraper.py` | Playwright driver for Avelo's form + **pure parsers** (`parse_schedule`, `parse_lowfare_calendar`, `parse_select_page`, `plan_targets`) |
-| `optimizer.py` | `Availability`/`Window`, `GetawayQuery`, `build_itineraries`, rankings (price/fit/sun/door-to-door), `enrich*`, `wildcard` |
-| `signals.py` | sale wave / sold out / floor detection between consecutive runs; `XP` runs only until Phase 3 (`SIGNAL_AIRLINES`) |
-| `alerts.py` | watchlist rules + packages, push selection, ntfy + SMTP delivery; watches/rules evaluated once after all airlines' runs, an airline's route signals pushed right after its run when another airline follows |
-| `bookings.py` | booked-trip tracker + Plus ROI meter |
+| `optimizer.py` | `Availability`/`Window`, `GetawayQuery` (`origins`, `airlines`, `allow_open_jaw`, `count_carry_on`), `build_itineraries` (mixed-airline packages, each leg labelled; `Itinerary.airlines`, `program_savings` = what a membership would take off legs the owner pays public fare on), rankings (price/fit/sun/door-to-door), `enrich*`, `wildcard` |
+| `signals.py` | sale wave / sold out / floor detection between consecutive runs of the **same airline**; floors, baselines and events are per airline, so a Frontier sale never moves Avelo's floor |
+| `alerts.py` | watchlist rules + packages, push selection, ntfy + SMTP delivery; alert state is written only after a push is delivered (`StateWrite` / `apply_writes`; with `AVELO_OFFLINE` or no push channel the in-app feed is the delivery); watches compare on fares only (carry-on never counts as a price change); a membership change raises no alert; route signals are pushed only for the watched airline and titles name it; watches/rules evaluated once after all airlines' runs, an airline's route signals pushed right after its run when another airline follows |
+| `bookings.py` | booked-trip tracker (each leg knows its airline; old bookings are Avelo) + Plus ROI meter (Avelo legs only; `program_savings(airline)`) |
 | `planner.py` | season planner (one trip per window under a budget) |
 | `holidays.py` | US federal holidays, computed |
 | `places.py` | geocode (Open-Meteo) + drive times (OSRM public, haversine fallback), cached in DB |
 | `weather.py` | Open-Meteo 16-day forecast, sun score |
-| `scheduler.py` | launchd plist install/remove (cron line elsewhere) |
-| `handoff.py` | assisted booking: headful browser, per-leg search, never books |
+| `scheduler.py` | launchd plist install/remove (cron line elsewhere); the job runs `run_scraper.py --from-rules`, so targets are read when it runs, not baked into the plist |
+| `handoff.py` | assisted booking, never books: legs are `ORG-DST:DATE[:AIRLINE]` (default `XP`); Avelo legs drive the headful browser, Frontier legs open its results page in the default browser (promo is Avelo-only) |
 | `netutil.py` | urllib with certifi CA bundle (python.org CPython on macOS has no roots) |
-| `run_scraper.py` | CLI (`--airlines`, per-airline `--promo F9=CODE`); one run per airline; `--routes` is split per airline when several are requested; `build_command()` is what the dashboard button runs |
+| `run_scraper.py` | CLI (`--airlines`, per-airline `--promo F9=CODE`, `--from-rules` for the nightly job); one run per airline; `--routes` is split per airline when several are requested; `build_command()` is what the dashboard button runs |
 | `mock_data.py` | deterministic synthetic ILG schedule |
 | `app.py` | Streamlit dashboard |
 | `launch.py` | one-click launcher (venv re-exec, health-check reuse, detach/stop via `data/streamlit.pid`); `~/Desktop/Avelo Finder.command` calls it |
@@ -138,9 +142,8 @@ directory; keep both files. A scratch `AVELO_DB_PATH` for a test run may have an
 - A day-search page must name the requested route and day (`frontier.check_select`); a page for anything else
   is a failed search, never "no nonstop that day".
 - Fare semantics: `price` = what the owner would pay (program fare if a member of that airline's program, else
-  public), `base_price` = public fare, `member_price` = program fare. Frontier fares are stored, not in packages/watches/calendar/signals (see the Phase 3 convention below); they do still
-  appear in the dashboard's freshness table and selection counts (`route_freshness`, `selection_stats` are not
-  airline-aware yet; deferred to Phase 3).
+  public), `base_price` = public fare, `member_price` = program fare. Frontier fares are shown in packages, the fare calendar and the freshness table (which lists each airline's
+  routes separately; `route_freshness` and `selection_stats` take `airlines=`), and Frontier runs raise signals.
 - **Known limitations.** The public route page is paginated: only about 20 of ~30 destinations per home airport
   reach `route_catalog`, so unlisted routes need `--routes` (e.g. `--airlines F9 --routes PHL-MCO`).
   `frontier.is_challenge_page` markers are **unverified**: no real challenge page has been captured, so a
@@ -174,11 +177,19 @@ directory; keep both files. A scratch `AVELO_DB_PATH` for a test run may have an
   airline follows (its finished run is the next baseline, so a scrape killed later would lose them); the dashboard's "latest run" is each airline's newest run (`database.latest_run_ids`).
 - An index on a migrated column is created in `_migrate`, not `SCHEMA` (`SCHEMA` runs first, so on an
   existing database the column does not exist yet).
-- Until Phase 3, packages, watch evaluation and the fare calendar read `XP` rows only (`optimizer.find_itineraries`,
-  `app.py` calendar). Signals are `XP`-only too: `signals.run_detection` returns nothing for other airlines' runs
-  (`signals.SIGNAL_AIRLINES`), because `route_floor` and `events` have no airline column and an F9 run would
-  overwrite Avelo's floor and push "Avelo sale" alerts for Frontier fares. Phase 3 adds the airline column
-  (backfilled `XP`) and widens the set. Frontier data still shows in the freshness table and selection counts.
+- Packages read every airline in `GetawayQuery.airlines` (default all known); a rule saved without `airlines` is
+  Avelo-only, and one without `origins` means the primary home, so old rules behave as before. The fare calendar
+  and the packages table's signal badge are keyed by airline.
+- Alert state is written only after a push is delivered (`alerts.StateWrite` / `apply_writes`), so a failed push is
+  retried on the next run; with no push channel (or `AVELO_OFFLINE`) the in-app feed is the delivery.
+- Signals, floors and baselines are per airline: `route_floor` is keyed `(airline, origin, destination)` and `events`
+  carries an airline; rows from before Phase 3 were backfilled `XP`. Route signals are pushed only for the watched airline.
+- `run_scraper --from-rules` is what the nightly job runs; `AVELO_AIRLINES` caps which airlines it scrapes.
+- Carry-on fees are estimates in `config.CARRY_ON_FEE`, counted only when a query asks (`count_carry_on`), per leg
+  by that leg's airline. Avelo PLUS perks ($0 add-ons) apply to Avelo legs only.
+- Known limits: Frontier's public route page lists about 20 of ~30 destinations per home airport (pass others with
+  `--routes`); the dashboard has no controls yet for airlines, open-jaw, carry-on or memberships (Phase 4), so
+  those are set through saved rules, the `GetawayQuery` defaults and the settings table.
 - A run's `status` (ok/partial/failed) decides whether it can be a signal baseline.
 - Total Getaway Cost = member fares only; `MemberBenefits` locks add-ons at $0.
 - Long scrapes run as a `Popen` from the dashboard with a log tail, cancel, and timeout.
@@ -188,7 +199,7 @@ directory; keep both files. A scratch `AVELO_DB_PATH` for a test run may have an
 
 `data/flights.db` holds real ILG⇄TPA/LAL fares (Oct 2026) plus older HVN rows
 from the first version (harmless; purged as they depart). `price_history`
-has several observations for ILG→LAL. `scrape_runs` held 15 runs on Oct 6 2026;
+has several observations for ILG→LAL. `scrape_runs` held 18 runs (811 Avelo fares, no watches, rules or bookings yet) on Oct 7 2026;
 runs from before the `status` column have NULL status (finished ones still count
 as `ok` baselines, the two that never finished do not). The owner has
 subscribed to the ntfy topic and was asked to save a rule, watch packages, and
