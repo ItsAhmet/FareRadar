@@ -174,6 +174,7 @@ def parse_airline_codes(raw: str) -> list[str]:
 
 
 # Which airlines a scrape covers when --airlines is not given. Avelo only until the dashboard can show Frontier.
+# It also caps --from-rules (the nightly job): a saved rule or watch never adds an airline that is not listed here.
 ACTIVE_AIRLINES: list[str] = parse_airline_codes(os.getenv("AVELO_AIRLINES", "XP"))
 
 FRONTIER_HOME_URL = "https://www.flyfrontier.com/"

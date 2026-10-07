@@ -439,22 +439,122 @@ def test_routes_flag_with_one_airline_is_taken_as_given(isolated, monkeypatch):
     assert calls == [("F9", [("ILG", "TPA")]), ("XP", [("PHL", "DEN")])]
 
 
-def test_targets_come_from_rules_watches_and_bookings(isolated):
-    import alerts
-    from optimizer import Availability
+def _in(days: int) -> str:
+    return (date.today() + timedelta(days=days)).isoformat()
+
+
+def _rule(destinations, span_days=30, origins=("ILG",), airlines=("XP",)):
     from datetime import time
 
-    database.init_db()
-    assert run_scraper.targets_from_rules() == {"airlines": list(config.ACTIVE_AIRLINES), "origins": list(config.HOME_CODES),
-                                                "destinations": list(config.DESTINATIONS), "days": 60}
+    from optimizer import Availability
+
     av = Availability(2, time(18), 6, time(23, 59))
-    database.add_watch("rule", "r1", alerts.rule_payload(["TPA"], av, 1, 300, True, 100, span_days=30, origins=["ILG"], airlines=["XP"]))
-    database.add_watch("rule", "r2", alerts.rule_payload(["MCO", "DEN"], av, 1, 300, True, 100, span_days=45, origins=["PHL"], airlines=["F9"]))
-    database.add_watch("package", "w", {"out_trip": "F9|BWI|LAS|2026-12-01|*", "in_trip": "F9|LAS|BWI|2026-12-05|*"})
-    database.add_booking("b", {"out_trip": "XP|ILG|SRQ|2026-11-20|08:00", "in_trip": "XP|SRQ|ILG|2026-11-23|15:00"}, 100)
+    return alerts.rule_payload(list(destinations), av, 1, 300, True, 100, span_days=span_days,
+                               origins=list(origins), airlines=list(airlines))
+
+
+def test_targets_come_from_rules_watches_and_bookings(isolated, monkeypatch):
+    monkeypatch.setattr(config, "ACTIVE_AIRLINES", ["XP", "F9"])     # the owner opted in to Frontier
+    database.init_db()
+    assert run_scraper.targets_from_rules() == {"airlines": ["XP", "F9"], "origins": list(config.HOME_CODES),
+                                                "destinations": list(config.DESTINATIONS), "days": 60}
+    database.add_watch("rule", "r1", _rule(["TPA"], 30, ["ILG"], ["XP"]))
+    database.add_watch("rule", "r2", _rule(["MCO", "DEN"], 45, ["PHL"], ["F9"]))
+    # dates relative to today: a departed leg is ignored, so literal dates would fail once they pass
+    database.add_watch("package", "w", {"out_trip": f"F9|BWI|LAS|{_in(55)}|*", "in_trip": f"F9|LAS|BWI|{_in(59)}|*"})
+    database.add_booking("b", {"out_trip": f"XP|ILG|SRQ|{_in(44)}|08:00", "in_trip": f"XP|SRQ|ILG|{_in(47)}|15:00"}, 100)
     t = run_scraper.targets_from_rules()
     assert t["airlines"] == ["F9", "XP"] and t["origins"] == ["BWI", "ILG", "PHL"]
-    assert t["destinations"] == ["DEN", "LAS", "MCO", "SRQ", "TPA"] and t["days"] >= 45
+    assert t["destinations"] == ["DEN", "LAS", "MCO", "SRQ", "TPA"] and t["days"] == 60   # the watch's return leg
+
+
+def test_departed_legs_do_not_count(isolated, monkeypatch):
+    monkeypatch.setattr(config, "ACTIVE_AIRLINES", ["XP"])
+    database.init_db()
+    database.add_booking("past", {"out_trip": f"XP|ILG|SRQ|{_in(-5)}|08:00", "in_trip": f"XP|SRQ|ILG|{_in(-2)}|15:00"}, 100)
+    database.add_booking("b", {"out_trip": f"XP|ILG|TPA|{_in(-1)}|08:00", "in_trip": f"XP|TPA|ILG|{_in(3)}|15:00"}, 100)
+    assert run_scraper.targets_from_rules() == {"airlines": ["XP"], "origins": ["ILG"], "destinations": ["TPA"], "days": 4}
+
+
+def test_rules_never_add_an_airline_that_avelo_airlines_leaves_out(isolated, monkeypatch):
+    """The dashboard saves every rule with all known airlines; AVELO_AIRLINES still gates the nightly job."""
+    monkeypatch.setattr(config, "ACTIVE_AIRLINES", ["XP"])
+    database.init_db()
+    database.add_watch("rule", "Florida", _rule(["TPA"], 30, config.HOME_CODES, sorted(config.KNOWN_AIRLINES)))
+    assert run_scraper.targets_from_rules()["airlines"] == ["XP"]
+    # a Frontier-only rule and a Frontier watch add nothing while Frontier is off: not their airports either
+    database.add_watch("rule", "west", _rule(["DEN"], 50, ["PHL"], ["F9"]))
+    database.add_watch("package", "w", {"out_trip": f"F9|BWI|LAS|{_in(40)}|*", "in_trip": f"F9|LAS|BWI|{_in(44)}|*"})
+    assert run_scraper.targets_from_rules() == {"airlines": ["XP"], "origins": sorted(config.HOME_CODES),
+                                                "destinations": ["TPA"], "days": 30}
+    monkeypatch.setattr(config, "ACTIVE_AIRLINES", ["XP", "F9"])
+    t = run_scraper.targets_from_rules()
+    assert t["airlines"] == ["F9", "XP"] and t["destinations"] == ["DEN", "LAS", "TPA"] and t["days"] == 50
+
+
+def test_only_frontier_targets_with_frontier_off_fall_back_to_the_active_default(isolated, monkeypatch):
+    monkeypatch.setattr(config, "ACTIVE_AIRLINES", ["XP"])
+    database.init_db()
+    database.add_watch("rule", "west", _rule(["DEN"], 50, ["PHL"], ["F9"]))
+    assert run_scraper.targets_from_rules() == {"airlines": ["XP"], "origins": list(config.HOME_CODES),
+                                                "destinations": list(config.DESTINATIONS), "days": 60}
+
+
+def test_nightly_command_launches_only_active_airlines_for_a_dashboard_rule(isolated, monkeypatch):
+    import scheduler
+
+    monkeypatch.setattr(config, "ACTIVE_AIRLINES", ["XP"])
+    monkeypatch.setattr(config, "OFFLINE", True)
+    database.init_db()
+    database.upsert_catalog("F9", [("PHL", "TPA"), ("TPA", "PHL")], "route_page")
+    database.add_watch("rule", "Florida", _rule(["TPA"], 30, config.HOME_CODES, sorted(config.KNOWN_AIRLINES)))
+    launched = []
+
+    class Fake:
+        def __init__(self, **_k):
+            pass
+
+        async def run(self, routes, dates):
+            return ScrapeReport()
+
+    monkeypatch.setattr(run_scraper, "scraper_class", lambda code: launched.append(code) or Fake)
+    run_scraper.main(scheduler.job_command(python="py")[2:] + ["--no-alerts"])
+    nightly = list(launched)
+    launched.clear()
+    run_scraper.main(["--destinations", "TPA", "--days", "30", "--mode", "calendar", "--no-alerts"])
+    assert nightly == launched == ["XP"]
+    launched.clear()
+    run_scraper.main(["--from-rules", "--airlines", "F9", "--no-alerts"])     # an explicit flag still wins
+    assert launched == ["F9"]
+
+
+def test_unscrapeable_stored_targets_are_dropped_and_logged(isolated, monkeypatch, caplog):
+    monkeypatch.setattr(config, "ACTIVE_AIRLINES", ["XP", "F9"])
+    database.init_db()
+    database.add_watch("rule", "mixed", _rule(["TPA", "XYZ"], 30, ["ILG", "QQQ"], ["XP"]))
+    database.add_watch("rule", "nowhere", _rule(["XYZ"], 90, ["ILG"], ["XP"]))            # nothing left: no span either
+    database.add_watch("package", "unknown far end", {"out_trip": f"F9|PHL|XYZ|{_in(20)}|*", "in_trip": f"F9|XYZ|PHL|{_in(80)}|*"})
+    database.add_watch("package", "no home end", {"out_trip": f"F9|DEN|LAS|{_in(85)}|*"})
+    database.add_watch("package", "garbage", {"out_trip": "not-a-key"})
+    database.add_watch("package", "other airline", {"out_trip": f"NK|PHL|MCO|{_in(88)}|*"})
+    database.add_booking("ok", {"out_trip": f"F9|PHL|MCO|{_in(10)}|08:00", "in_trip": f"F9|MCO|PHL|{_in(13)}|15:00"}, 100)
+    with caplog.at_level("WARNING", logger="run_scraper"):
+        t = run_scraper.targets_from_rules()
+    assert t == {"airlines": ["F9", "XP"], "origins": ["ILG", "PHL"], "destinations": ["MCO", "TPA"], "days": 30}
+    assert run_scraper.parse_origins(",".join(t["origins"])) and run_scraper.parse_destinations(",".join(t["destinations"]))
+    logged = caplog.text
+    for needle in ("XYZ", "QQQ", "no home airport", "not-a-key", "NK"):
+        assert needle in logged
+
+
+def test_one_bad_watch_does_not_stop_the_nightly_run(isolated):
+    database.init_db()
+    database.add_watch("rule", "r", _rule(["TPA"], 5, ["ILG"], ["XP"]))
+    database.add_watch("package", "bad", {"out_trip": f"F9|PHL|XYZ|{_in(20)}|*"})
+    database.add_watch("package", "bad2", {"out_trip": f"XP|ILG|XYZ|{_in(20)}|*"})
+    assert run_scraper.main(["--from-rules", "--mock", "--no-alerts"]) == 0
+    runs = database.last_runs(5)
+    assert len(runs) == 1 and runs[0]["status"] == "ok"
 
 
 def test_from_rules_flag_fills_the_request(isolated, monkeypatch):

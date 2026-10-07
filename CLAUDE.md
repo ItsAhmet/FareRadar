@@ -33,7 +33,8 @@ Settings live in `.env` (git-ignored; `.env.example` documents every key).
 change it unless asked. `AVELO_OFFLINE=1` disables all network calls (weather,
 geocoding, routing, pushes); tests set `config.OFFLINE` via monkeypatch.
 `AVELO_AIRLINES` (default `XP`) picks the airlines a scrape covers when `--airlines` is not given;
-`XP,F9` opts in to Frontier.
+`XP,F9` opts in to Frontier. `--from-rules` (the nightly job) is capped by it too: rules and watches never add an
+airline it leaves out, and stored airport codes the scraper does not know are skipped with a warning.
 
 A root `conftest.py` plus `pytest.ini` make any test that opens the owner's database (`data/flights.db`, or
 whatever `AVELO_DB_PATH` names) fail. `pytest.ini` pins pytest's rootdir so the guard loads from any working

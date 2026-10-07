@@ -76,6 +76,9 @@ python run_scraper.py --airlines XP,F9 --routes ILG-TPA,PHL-MCO   # each airline
 AVELO_AIRLINES=XP,F9                                              # in .env: the default when --airlines is omitted
 ```
 
+The nightly job (`run_scraper.py --from-rules`) takes its targets from saved rules, watches and bookings, but only
+for airlines listed in `AVELO_AIRLINES`: a rule that names Frontier does not scrape Frontier until you opt in there.
+
 Frontier fares are **stored but not yet shown in the product**: packages, watch rules and the fare calendar read
 Avelo rows only until Phase 3, and signal detection (so alerts, pushes and the dashboard's signal feed) skips
 Frontier runs. Frontier data does still appear in two dashboard places that are not airline-aware yet: the

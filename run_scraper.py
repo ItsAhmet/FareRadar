@@ -174,34 +174,85 @@ def build_command(
 
 def targets_from_rules(conn=None, default_days: int = 60) -> dict:
     """What the saved rules, watched packages and booked trips need scraped: decided when the job runs,
-    so a rule added today is covered tonight without reinstalling the job."""
+    so a rule added today is covered tonight without reinstalling the job.
+
+    AVELO_AIRLINES still decides which airlines an unattended run may visit: a rule or leg counts only
+    for its airlines in config.ACTIVE_AIRLINES (the dashboard saves every rule with all known airlines).
+    Stored data is not trusted to be scrapeable: airport codes the request parsers would reject and legs
+    that touch no home airport are dropped and logged, so one odd watch cannot stop the whole run."""
+    log = logging.getLogger("run_scraper")
+    active = list(config.ACTIVE_AIRLINES)
     airline_codes: set[str] = set()
     origins: set[str] = set()
     destinations: set[str] = set()
+    dropped: set[str] = set()
     days = 0
     today = date.today()
+
+    def known_home(code: str) -> bool:
+        return code in config.HOME_AIRPORT_INFO
+
+    def known_destination(code: str) -> bool:
+        return code in config.DESTINATIONS or code in config.FRONTIER_AIRPORTS
+
     for watch in database.list_watches("rule", conn):
         p = watch["payload"]
-        airline_codes.update(p.get("airlines") or ["XP"])
-        origins.update(p.get("origins") or [config.PRIMARY_HOME])
-        destinations.update(p.get("destinations", []))
-        days = max(days, int(p.get("span_days", default_days)))
+        wanted = [str(a).strip().upper() for a in (p.get("airlines") or ["XP"])]
+        airlines = [a for a in wanted if a in active]
+        if not airlines:
+            dropped.add(f"rule '{watch.get('label', '')}': airlines {','.join(wanted)} not in AVELO_AIRLINES")
+            continue
+        codes_from = [str(c).strip().upper() for c in (p.get("origins") or [config.PRIMARY_HOME])]
+        codes_to = [str(c).strip().upper() for c in p.get("destinations", [])]
+        bad = [c for c in codes_from if not known_home(c)] + [c for c in codes_to if not known_destination(c)]
+        if bad:
+            dropped.add(f"rule '{watch.get('label', '')}': unknown airport(s) {','.join(bad)}")
+        codes_from = [c for c in codes_from if known_home(c)]
+        codes_to = [c for c in codes_to if known_destination(c)]
+        if not (codes_from and codes_to):
+            continue
+        airline_codes.update(airlines)
+        origins.update(codes_from)
+        destinations.update(codes_to)
+        try:
+            days = max(days, int(p.get("span_days", default_days)))
+        except (TypeError, ValueError):
+            days = max(days, default_days)
     payloads = [w["payload"] for w in database.list_watches("package", conn)] + [b["payload"] for b in database.list_bookings(conn)]
     for p in payloads:
         for leg in ("out", "in"):
             key = trips.payload_trip(p, leg)
             if not key:
                 continue
-            k = trips.parse(key)
+            try:
+                k = trips.parse(key)
+            except ValueError:
+                dropped.add(f"leg {key}: not a trip key")
+                continue
             if k.day < today:
                 continue
-            airline_codes.add(k.airline)
-            home, away = (k.origin, k.destination) if config.is_home(k.origin) else (k.destination, k.origin)
+            airline, origin, destination = k.airline.strip().upper(), k.origin.strip().upper(), k.destination.strip().upper()
+            if airline not in active:
+                dropped.add(f"leg {key}: airline {airline} not in AVELO_AIRLINES")
+                continue
+            if known_home(origin):
+                home, away = origin, destination
+            elif known_home(destination):
+                home, away = destination, origin
+            else:
+                dropped.add(f"leg {key}: no home airport")
+                continue
+            if not known_destination(away):
+                dropped.add(f"leg {key}: unknown airport {away}")
+                continue
+            airline_codes.add(airline)
             origins.add(home)
             destinations.add(away)
             days = max(days, (k.day - today).days + 1)
+    for reason in sorted(dropped):
+        log.warning("targets from rules: skipped %s", reason)
     if not (airline_codes and origins and destinations):
-        return {"airlines": list(config.ACTIVE_AIRLINES), "origins": list(config.HOME_CODES),
+        return {"airlines": active, "origins": list(config.HOME_CODES),
                 "destinations": list(config.DESTINATIONS), "days": default_days}
     return {"airlines": sorted(airline_codes), "origins": sorted(origins), "destinations": sorted(destinations),
             "days": max(days, 1)}
