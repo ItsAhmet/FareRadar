@@ -67,6 +67,19 @@ def test_calendar_that_is_not_an_answer_covers_nothing():
     assert frontier.parse_calendar(payload, "PHL", "MCO") == ([], [])    # nothing priced: not "everything sold out"
 
 
+def test_calendar_for_another_route_is_rejected():
+    payload = load("lowfare_calendar_PHL_MCO_2026-11.json")
+    with pytest.raises(ScrapeError):
+        frontier.parse_calendar(payload, "BWI", "SFO")                # a late reply for the previous route
+    with pytest.raises(ScrapeError):
+        frontier.parse_calendar(payload, "MCO", "PHL")                # reversed
+    del payload["calendarSections"][0]["departingStation"]
+    with pytest.raises(ScrapeError):
+        frontier.parse_calendar(payload, "PHL", "MCO")                # cannot prove which route it answers
+    ok = load("lowfare_calendar_PHL_MCO_2026-11.json")
+    assert frontier.parse_calendar(ok, " phl", "mco ")[1]             # same route, any case/whitespace
+
+
 def test_calendar_unavailable_day_is_answered_without_a_fare():
     payload = load("lowfare_calendar_PHL_MCO_2026-11.json")
     day3 = next(d for w in payload["calendarSections"][0]["weeks"] for d in w["days"] if d["dateFormatted"] == "2026-11-03")

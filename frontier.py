@@ -98,9 +98,14 @@ def parse_calendar(payload: dict, origin: str, destination: str, member: bool = 
         raise ScrapeError("Frontier calendar response missing or unsuccessful")
     scraped_at = scraped_at or datetime.now()
     origin, destination = origin.strip().upper(), destination.strip().upper()
+    section = payload["calendarSections"][0]
+    # The response is a captured POST: a late reply for the previous route must not be stored under this one.
+    stations = (_F9.app_code(section.get("departingStation") or ""), _F9.app_code(section.get("arrivalStation") or ""))
+    if stations != (origin, destination):
+        raise ScrapeError(f"Frontier calendar is for {stations[0] or '?'}-{stations[1] or '?'}, not {origin}-{destination}")
     flights: list[Flight] = []
     answered: list[date] = []
-    for week in payload["calendarSections"][0].get("weeks") or []:
+    for week in section.get("weeks") or []:
         for cell in week.get("days") or []:
             if cell.get("isEmpty"):
                 continue
