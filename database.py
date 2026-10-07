@@ -585,10 +585,10 @@ def route_medians(
     end_date: date,
     conn: sqlite3.Connection | None = None,
     airlines: Iterable[str] | None = None,
-) -> dict[tuple[str, str], float]:
-    """Median current fare per directional route in the span: the 'typical'
-    price a package is compared against for its deal score. `airlines`
-    restricts to those carriers (None = all)."""
+) -> dict[tuple[str, str, str], float]:
+    """Median current fare per airline and directional route in the span, keyed
+    (airline, origin, destination): the 'typical' price a package leg is compared
+    against for its deal score. `airlines` restricts to those carriers (None = all)."""
     origins, destinations = _codes(origins), [d.upper() for d in destinations]
     if not destinations or not origins:
         return {}
@@ -603,14 +603,14 @@ def route_medians(
         airline_sql = f" AND airline IN ({_placeholders(codes)})"
         params.extend(codes)
     sql = f"""
-        SELECT origin, destination, price FROM avelo_flights
+        SELECT airline, origin, destination, price FROM avelo_flights
         WHERE ((origin IN ({po}) AND destination IN ({pd_})) OR (destination IN ({po}) AND origin IN ({pd_})))
           AND departure_datetime >= ? AND departure_datetime < ?{airline_sql}
-        ORDER BY origin, destination, price
+        ORDER BY airline, origin, destination, price
     """
-    prices: dict[tuple[str, str], list[float]] = {}
+    prices: dict[tuple[str, str, str], list[float]] = {}
     for r in _fetch(sql, params, conn):
-        prices.setdefault((r["origin"], r["destination"]), []).append(r["price"])
+        prices.setdefault((r["airline"], r["origin"], r["destination"]), []).append(r["price"])
     medians = {}
     for key, values in prices.items():
         n = len(values)

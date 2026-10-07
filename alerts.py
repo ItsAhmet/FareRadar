@@ -62,9 +62,10 @@ def package_key(it: Itinerary) -> dict:
 def package_label(it: Itinerary) -> str:
     """Human label for watches, pushes and bookings. Leads with the home airport
     ('ILG', or 'ILG→PHL' for an open-jaw return) so trips from different homes
-    on the same dates never read alike."""
+    on the same dates never read alike, and ends with the airline(s) flown."""
     return (f"{it.home_label} · {it.destination_city} · {it.route_mix}"
-            f" · out {it.outbound.departure_date:%a %b %d}, back {it.inbound.departure_date:%a %b %d}")
+            f" · out {it.outbound.departure_date:%a %b %d}, back {it.inbound.departure_date:%a %b %d}"
+            f" · {it.airline_label}")
 
 
 def rule_payload(

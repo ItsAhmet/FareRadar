@@ -149,6 +149,7 @@ def run_search(query: GetawayQuery) -> list[Itinerary]:
         query.max_pair_miles,
         tuple(query.origins),
         query.allow_open_jaw,
+        tuple(sorted(query.airlines)),
         _db_version(),
     )
     cache = _search_cache()
@@ -883,7 +884,7 @@ def results_table(ranked: list[Itinerary], version: float = 0.0) -> None:
             "Times Verified": st.column_config.CheckboxColumn(disabled=True),
         },
         column_order=[
-            "Rank", "Window", "Destination", "Home", "Route Mix", "Total Getaway Cost", "Deal vs Typical", "Trend", "Signals",
+            "Rank", "Window", "Destination", "Home", "Airlines", "Route Mix", "Total Getaway Cost", "Deal vs Typical", "Trend", "Signals",
             "Out Route", "Out Date", "Out Time", "Out Price",
             "Back Route", "Back Date", "Back Time", "Back Price",
             "Nights", "Fit", "Sun Score", "Δ°F vs home", "Drive (min)", "Door-to-door", "Home-side $",

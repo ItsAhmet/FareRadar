@@ -135,7 +135,7 @@ def test_route_medians_and_freshness(conn):
     db.upsert_flights([flight(day=10, price=50), flight(day=12, price=90, number="XP2"), flight(day=14, price=70, number="XP3"),
                        flight(origin="TPA", dest="ILG", day=13, price=40, number="XP4")], conn)
     med = db.route_medians("ILG", ["TPA"], date(2026, 10, 1), date(2026, 10, 31), conn=conn)
-    assert med == {("ILG", "TPA"): 70, ("TPA", "ILG"): 40}
+    assert med == {("XP", "ILG", "TPA"): 70, ("XP", "TPA", "ILG"): 40}
     fresh = db.route_freshness("ILG", ["TPA"], conn=conn)
     assert [(r["origin"], r["destination"], r["fares"]) for r in fresh] == [("ILG", "TPA", 3), ("TPA", "ILG", 1)]
 
@@ -211,7 +211,7 @@ def test_route_queries_accept_several_origins(conn):
     db.upsert_flights([flight(day=10, price=80), flight(origin="PHL", day=10, price=60, number="XP7"),
                        flight(origin="TPA", dest="PHL", day=12, price=50, number="XP8")], conn)
     med = db.route_medians(["ILG", "PHL"], ["TPA"], date(2026, 10, 1), date(2026, 10, 31), conn=conn)
-    assert med == {("ILG", "TPA"): 80, ("PHL", "TPA"): 60, ("TPA", "PHL"): 50}
+    assert med == {("XP", "ILG", "TPA"): 80, ("XP", "PHL", "TPA"): 60, ("XP", "TPA", "PHL"): 50}
     s = db.selection_stats(["ILG", "PHL"], ["TPA"], date(2026, 10, 1), date(2026, 10, 31), conn=conn)
     assert s["flights"] == 3 and s["routes"] == 3
     fresh = db.route_freshness(["ILG", "PHL"], ["TPA"], conn=conn)
@@ -411,10 +411,11 @@ def test_route_medians_and_calendar_can_be_scoped_to_airlines(conn):
                        f9(hour=9, price=300, number="1"), f9(hour=10, price=400, number="2"),
                        f9(hour=11, price=20, number="3")], conn)
     span = (date(2026, 10, 10), date(2026, 10, 10))
-    assert db.route_medians(["PHL"], ["MCO"], *span, conn=conn, airlines=["XP"]) == {("PHL", "MCO"): 60}
-    assert db.route_medians(["PHL"], ["MCO"], *span, conn=conn, airlines=["f9"]) == {("PHL", "MCO"): 300}
+    assert db.route_medians(["PHL"], ["MCO"], *span, conn=conn, airlines=["XP"]) == {("XP", "PHL", "MCO"): 60}
+    assert db.route_medians(["PHL"], ["MCO"], *span, conn=conn, airlines=["f9"]) == {("F9", "PHL", "MCO"): 300}
     assert db.route_medians(["PHL"], ["MCO"], *span, conn=conn, airlines=[]) == {}
-    assert db.route_medians(["PHL"], ["MCO"], *span, conn=conn)[("PHL", "MCO")] == 180   # unscoped: all carriers
+    unscoped = db.route_medians(["PHL"], ["MCO"], *span, conn=conn)
+    assert unscoped == {("XP", "PHL", "MCO"): 60, ("F9", "PHL", "MCO"): 300}   # unscoped: every carrier, kept apart
     cal = db.route_calendar(*span, conn=conn, airlines=["XP"])
     assert cal == [{"origin": "PHL", "destination": "MCO", "day": "2026-10-10", "min_price": 60, "flights": 1}]
     assert db.route_calendar(*span, conn=conn, airlines=[]) == []
@@ -600,3 +601,10 @@ def test_database_guard_is_loaded_when_pytest_starts_outside_the_project_root(st
     )
     assert done.returncode == 0, done.stdout[-2000:] + done.stderr[-2000:]
     assert "2 passed" in done.stdout and "error" not in done.stdout.lower()
+
+
+def test_route_medians_are_keyed_by_airline(conn):
+    db.upsert_flights([flight(origin="PHL", dest="MCO", day=10, price=100, number="XP1"), f9(price=60.0)], conn)
+    med = db.route_medians(["PHL"], ["MCO"], date(2026, 10, 1), date(2026, 10, 31), conn=conn)
+    assert med == {("XP", "PHL", "MCO"): 100, ("F9", "PHL", "MCO"): 60}
+    assert db.route_medians(["PHL"], ["MCO"], date(2026, 10, 1), date(2026, 10, 31), conn=conn, airlines=["F9"]) == {("F9", "PHL", "MCO"): 60}

@@ -157,7 +157,7 @@ def test_find_itineraries_reads_from_db_and_ignores_other_origins():
 
 def test_dataframe_columns():
     df = to_dataframe(build_itineraries([f("ILG", "TPA", 8, hour=8)], [f("TPA", "ILG", 11, hour=12)], q()))
-    assert list(df.columns[:6]) == ["Rank", "Window", "Destination", "Home", "Route Mix", "Out Route"]
+    assert list(df.columns[:7]) == ["Rank", "Window", "Destination", "Home", "Airlines", "Route Mix", "Out Route"]
     assert df.loc[0, "Total Getaway Cost"] == 200
 
 
@@ -188,7 +188,7 @@ def test_enrich_computes_deal_and_trend():
 
     out, back = f("ILG", "TPA", 8, hour=8, price=80), f("TPA", "ILG", 11, hour=15, price=60)
     (it,) = build_itineraries([out], [back], q())
-    enrich([it], {("ILG", "TPA"): 100, ("TPA", "ILG"): 100}, {(out.flight_id, "2026-10-08T08:00"): 95})
+    enrich([it], {("XP", "ILG", "TPA"): 100, ("XP", "TPA", "ILG"): 100}, {(out.flight_id, "2026-10-08T08:00"): 95})
     assert it.typical_total == 200
     assert it.deal_pct == 0.3  # $140 vs $200 typical
     assert it.previous_total == 155  # 95 + current 60
@@ -349,15 +349,12 @@ def test_clear_drives_restores_the_default_rate_and_drops_drives():
     assert it.parking_cost == 51.0 and it.home_drive_min == 80   # home-side data is not touched
 
 
-def test_packages_use_avelo_rows_only_until_phase_3():
+def test_packages_include_frontier_rows_by_default():
     conn = db.get_connection(":memory:")
-    out_f9 = Flight(origin="PHL", destination="TPA", departure_datetime=datetime(2026, 10, 8, 9), price=60,
-                    duration_minutes=150, airline="F9", flight_id="F9-1-PHL-TPA")
-    back_f9 = Flight(origin="TPA", destination="PHL", departure_datetime=datetime(2026, 10, 11, 16), price=60,
-                     duration_minutes=150, airline="F9", flight_id="F9-2-TPA-PHL")
-    db.upsert_flights([out_f9, back_f9, f("ILG", "TPA", 8, hour=8), f("TPA", "ILG", 11, hour=15)], conn)
+    db.upsert_flights([leg("F9", "PHL", "TPA", 8, 9, 60), leg("F9", "TPA", "PHL", 11, 16, 60),
+                       f("ILG", "TPA", 8, hour=8), f("TPA", "ILG", 11, hour=15)], conn)
     its = find_itineraries(q(origins=["ILG", "PHL"]), conn=conn)
-    assert {i.outbound.airline for i in its} == {"XP"} and len(its) == 1
+    assert {i.airlines for i in its} == {("XP", "XP"), ("F9", "F9")}
     conn.close()
 
 
@@ -366,6 +363,40 @@ def test_deal_score_medians_ignore_other_airlines():
     cheap_f9 = [Flight(origin="ILG", destination="TPA", departure_datetime=datetime(2026, 10, 9, h), price=400,
                        duration_minutes=150, airline="F9", flight_id=f"F9-{h}-ILG-TPA") for h in (9, 10, 11)]
     db.upsert_flights([f("ILG", "TPA", 8, hour=8, price=100), f("TPA", "ILG", 11, hour=15, price=100), *cheap_f9], conn)
-    (it,) = find_itineraries(q(), conn=conn)
-    assert it.typical_total == 200      # Avelo medians only; F9 at 400 must not lift it
+    its = {i.airlines: i for i in find_itineraries(q(), conn=conn)}
+    assert its[("XP", "XP")].typical_total == 200      # Avelo medians only; F9 at 400 must not lift it
+    conn.close()
+
+
+def leg(airline, origin, dest, day, hour, price, base=None, den=None):
+    return Flight(airline=airline, origin=origin, destination=dest, departure_datetime=datetime(2026, 10, day, hour),
+                  price=price, base_price=base if base is not None else price, member_price=den, duration_minutes=150,
+                  flight_id=f"{airline}-{origin}-{dest}-{hour}")
+
+
+def test_packages_mix_airlines_and_label_each_leg():
+    conn = db.get_connection(":memory:")
+    db.upsert_flights([leg("XP", "PHL", "TPA", 8, 8, 90), leg("F9", "PHL", "TPA", 8, 9, 60, den=59),
+                       leg("XP", "TPA", "PHL", 11, 15, 80), leg("F9", "TPA", "PHL", 11, 16, 50, den=49)], conn)
+    its = find_itineraries(q(origins=["PHL"]), conn=conn)
+    assert {i.airlines for i in its} == {("XP", "XP"), ("XP", "F9"), ("F9", "XP"), ("F9", "F9")}
+    cheapest = rank_by_price(its)[0]
+    assert cheapest.airlines == ("F9", "F9") and cheapest.airline_label == "Frontier" and cheapest.total_price == 110
+    mixed = next(i for i in its if i.airlines == ("XP", "F9"))
+    assert mixed.airline_label == "Avelo out · Frontier back"
+    assert list(to_dataframe([mixed])["Airlines"]) == ["Avelo out · Frontier back"]
+    only_avelo = find_itineraries(q(origins=["PHL"], airlines={"xp"}), conn=conn)
+    assert {i.airlines for i in only_avelo} == {("XP", "XP")}
+    with pytest.raises(ValueError):
+        q(airlines=set())
+    conn.close()
+
+
+def test_typical_price_is_per_airline():
+    conn = db.get_connection(":memory:")
+    db.upsert_flights([leg("XP", "PHL", "TPA", 8, 8, 200), leg("F9", "PHL", "TPA", 8, 9, 60),
+                       leg("XP", "TPA", "PHL", 11, 15, 200), leg("F9", "TPA", "PHL", 11, 16, 60)], conn)
+    its = {i.airlines: i for i in find_itineraries(q(origins=["PHL"]), conn=conn)}
+    assert its[("F9", "F9")].typical_total == 120 and its[("XP", "XP")].typical_total == 400
+    assert its[("XP", "F9")].typical_total == 260          # each leg against its own airline's median
     conn.close()

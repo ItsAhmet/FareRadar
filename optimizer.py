@@ -33,6 +33,7 @@ import random
 
 import pandas as pd
 
+import airlines as airline_registry
 import config
 from config import DESTINATIONS, HomeCost, airport_name, distance_miles
 from holidays import holidays_between
@@ -162,12 +163,16 @@ class GetawayQuery:
     allow_mix: bool = True
     max_pair_miles: float = 100.0
     allow_open_jaw: bool = False  # may a trip return to a different home airport?
+    airlines: set[str] = field(default_factory=lambda: set(config.KNOWN_AIRLINES))  # whose fares to build from
 
     def __post_init__(self) -> None:
         self.destinations = {d.upper() for d in self.destinations}
         self.origins = list(dict.fromkeys(o.strip().upper() for o in self.origins))
         if not self.origins:
             raise ValueError("at least one origin (home airport) is required")
+        self.airlines = {a.strip().upper() for a in self.airlines}
+        if not self.airlines:
+            raise ValueError("at least one airline is required")
         if self.min_nights < 0:
             raise ValueError("min_nights cannot be negative")
         if not self.windows:
@@ -301,6 +306,16 @@ class Itinerary:
     @property
     def home_label(self) -> str:
         return f"{self.home_out}→{self.home_back}" if self.is_open_jaw else self.home_out
+
+    @property
+    def airlines(self) -> tuple[str, str]:
+        """(outbound airline, inbound airline) codes."""
+        return self.outbound.airline, self.inbound.airline
+
+    @property
+    def airline_label(self) -> str:
+        out, back = (airline_registry.get(code).name for code in self.airlines)
+        return out if out == back else f"{out} out · {back} back"
 
     @property
     def is_mixed(self) -> bool:
@@ -499,13 +514,13 @@ def enrich_home(itineraries: list[Itinerary], costs: dict[str, HomeCost]) -> lis
 
 def enrich(
     itineraries: list[Itinerary],
-    medians: dict[tuple[str, str], float],
+    medians: dict[tuple[str, str, str], float],
     previous: dict[tuple[str, str], float],
 ) -> list[Itinerary]:
     """Attach deal score and trend inputs. Pure: takes the lookups as dicts."""
     for it in itineraries:
-        m_out = medians.get((it.outbound.origin, it.outbound.destination))
-        m_in = medians.get((it.inbound.origin, it.inbound.destination))
+        m_out = medians.get((it.outbound.airline, it.outbound.origin, it.outbound.destination))
+        m_in = medians.get((it.inbound.airline, it.inbound.origin, it.inbound.destination))
         it.typical_total = round(m_out + m_in + it.addon_fees, 2) if m_out is not None and m_in is not None else None
         p_out = previous.get((it.outbound.flight_id, it.outbound.departure_datetime.isoformat(timespec="minutes")))
         p_in = previous.get((it.inbound.flight_id, it.inbound.departure_datetime.isoformat(timespec="minutes")))
@@ -521,13 +536,12 @@ def enrich(
 
 def find_itineraries(query: GetawayQuery, conn: sqlite3.Connection | None = None) -> list[Itinerary]:
     start, end = query.span
-    # Phase 3 makes the airline set part of GetawayQuery; until then packages are Avelo-only.
-    outbounds = query_flights(query.origins, query.destinations, start, end, conn=conn, airlines=["XP"])
-    inbounds = query_flights(query.destinations, query.origins, start, end, conn=conn, airlines=["XP"])
+    outbounds = query_flights(query.origins, query.destinations, start, end, conn=conn, airlines=sorted(query.airlines))
+    inbounds = query_flights(query.destinations, query.origins, start, end, conn=conn, airlines=sorted(query.airlines))
     itineraries = build_itineraries(outbounds, inbounds, query)
     if not itineraries:
         return itineraries
-    medians = route_medians(query.origins, query.destinations, start, end, conn=conn, airlines=["XP"])
+    medians = route_medians(query.origins, query.destinations, start, end, conn=conn, airlines=sorted(query.airlines))
     keys = {(f.flight_id, f.departure_datetime) for it in itineraries for f in (it.outbound, it.inbound)}
     return enrich(itineraries, medians, previous_prices(keys, conn=conn))
 
@@ -560,6 +574,7 @@ def to_dataframe(itineraries: list[Itinerary]) -> pd.DataFrame:
                 "Window": it.window.label,
                 "Destination": it.destination_city,
                 "Home": it.home_label,
+                "Airlines": it.airline_label,
                 "Route Mix": it.route_mix,
                 "Out Route": it.outbound.route,
                 "Out Date": it.outbound.departure_datetime.strftime("%a %b %d"),
