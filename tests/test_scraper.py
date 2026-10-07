@@ -725,3 +725,8 @@ def test_scrape_day_returns_flights_from_the_bundles_layout():
     s = _results_scraper((FIXTURES / "select_page_bundles.html").read_text())
     (f,) = asyncio.run(s.scrape_day("TPA", "ILG", date(2026, 10, 12)))
     assert f.price == 110.0 and f.flight_number == "533"
+
+
+def test_avelo_parsers_keep_the_member_price():
+    (f,) = parse_select_page((FIXTURES / "select_page_bundles.html").read_text(), "TPA", "ILG", date(2026, 10, 12))
+    assert (f.price, f.member_price, f.base_price, f.airline) == (110.0, 110.0, 147.0, "XP")

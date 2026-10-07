@@ -61,3 +61,14 @@ def test_suite_is_hermetic_when_owner_puts_another_home_first():
         cwd=root, env=env, capture_output=True, text=True, timeout=300,
     )
     assert out.returncode == 0, out.stdout[-2000:] + out.stderr[-500:]
+
+
+def test_airline_settings_and_frontier_airports():
+    assert config.parse_airline_codes("xp, f9,XP,zz") == ["XP", "F9"]
+    assert config.parse_airline_codes("") == ["XP"] and config.parse_airline_codes("zz") == ["XP"]
+    assert config.DEFAULT_MEMBERSHIPS == {"XP": True, "F9": False}
+    assert {"DEN", "LAS", "ATL", "MIA", "CUN", "ORD"} <= set(config.FRONTIER_AIRPORTS)
+    assert not set(config.FRONTIER_AIRPORTS) & set(config.DESTINATIONS)       # Avelo's list is untouched
+    assert config.airport_name("DEN") == "Denver" and config.distance_miles("PHL", "DEN") > 1400
+    assert config.storage_state_path("f9").name == "browser_state_F9.json"
+    assert set(config.FRONTIER_ROUTE_PAGES) == {"PHL", "BWI"}

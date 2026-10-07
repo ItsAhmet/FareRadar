@@ -120,7 +120,62 @@ REGION_COLORS: dict[str, tuple[int, int, int]] = {
 HUB_COLOR: tuple[int, int, int] = (31, 41, 55)
 INACTIVE_COLOR: tuple[int, int, int] = (176, 183, 195)
 
-ALL_AIRPORTS: dict[str, Airport] = {**HOME_AIRPORT_INFO, **DESTINATIONS}
+# Airports only Frontier flies from the home airports. Kept apart from DESTINATIONS (Avelo's list, which the
+# dashboard shows) until the dashboard gains airline filters in Phase 4.
+FRONTIER_AIRPORTS: dict[str, Airport] = {
+    a.code: a
+    for a in (
+        Airport("MIA", "Miami", "Florida", 25.7959, -80.2870),
+        Airport("JAX", "Jacksonville", "Florida", 30.4941, -81.6879),
+        Airport("ATL", "Atlanta", "Carolinas & Georgia", 33.6407, -84.4277),
+        Airport("CLT", "Charlotte", "Carolinas & Georgia", 35.2144, -80.9473),
+        Airport("DFW", "Dallas/Fort Worth", "Texas & Gulf", 32.8998, -97.0403),
+        Airport("IAH", "Houston", "Texas & Gulf", 29.9902, -95.3368),
+        Airport("MSY", "New Orleans", "Texas & Gulf", 29.9934, -90.2580),
+        Airport("DEN", "Denver", "West", 39.8561, -104.6737),
+        Airport("LAS", "Las Vegas", "West", 36.0840, -115.1537),
+        Airport("PHX", "Phoenix", "West", 33.4352, -112.0101),
+        Airport("LAX", "Los Angeles", "West", 33.9416, -118.4085),
+        Airport("SFO", "San Francisco", "West", 37.6213, -122.3790),
+        Airport("DTW", "Detroit", "Midwest", 42.2162, -83.3554),
+        Airport("IND", "Indianapolis", "Midwest", 39.7169, -86.2956),
+        Airport("MSP", "Minneapolis", "Midwest", 44.8848, -93.2223),
+        Airport("ORD", "Chicago", "Midwest", 41.9742, -87.9073),
+        Airport("CUN", "Cancún", "Mexico & Central America", 21.0365, -86.8771),
+        Airport("SAL", "San Salvador", "Mexico & Central America", 13.4409, -89.0557),
+        Airport("PUJ", "Punta Cana", "Caribbean", 18.5674, -68.3634),
+        Airport("SDQ", "Santo Domingo", "Caribbean", 18.4297, -69.6689),
+        Airport("MBJ", "Montego Bay", "Caribbean", 18.5037, -77.9134),
+    )
+}
+
+ALL_AIRPORTS: dict[str, Airport] = {**HOME_AIRPORT_INFO, **DESTINATIONS, **FRONTIER_AIRPORTS}
+
+# --------------------------------------------------------------------------- #
+# Airlines
+# --------------------------------------------------------------------------- #
+
+KNOWN_AIRLINES: tuple[str, ...] = ("XP", "F9")  # Avelo, Frontier
+DEFAULT_MEMBERSHIPS: dict[str, bool] = {"XP": True, "F9": False}  # Avelo PLUS member; not in Discount Den
+
+
+def parse_airline_codes(raw: str) -> list[str]:
+    """Known airline codes from a comma list, in order, de-duplicated; Avelo if none."""
+    codes = [c.strip().upper() for c in (raw or "").split(",") if c.strip()]
+    known = [c for c in dict.fromkeys(codes) if c in KNOWN_AIRLINES]
+    return known or ["XP"]
+
+
+# Which airlines a scrape covers when --airlines is not given. Avelo only until the dashboard can show Frontier.
+ACTIVE_AIRLINES: list[str] = parse_airline_codes(os.getenv("AVELO_AIRLINES", "XP"))
+
+FRONTIER_HOME_URL = "https://www.flyfrontier.com/"
+FRONTIER_SELECT_URL = "https://booking.flyfrontier.com/Flight/InternalSelect"
+FRONTIER_CALENDAR_ENDPOINT = "GetLowFareCalendarAvailability"  # POSTed by the calendar view
+FRONTIER_ROUTES_URL = "https://flights.flyfrontier.com/en/flights-from-{slug}"
+FRONTIER_ROUTE_PAGES: dict[str, str] = {"PHL": "philadelphia", "BWI": "baltimore"}  # home airport → page slug
+FRONTIER_SITE_CODES: dict[str, str] = {"PBI": "DJT"}  # app code → the code Frontier's site uses
+FRONTIER_PROBE_DAYS: int = 3  # day searches used to learn whether a route has nonstops
 
 
 def region_codes(region: str) -> list[str]:
@@ -235,6 +290,12 @@ PAGE_TIMEOUT_MS: int = 45_000
 # Stealth: cookies/localStorage persist between runs so each visit looks like
 # the same returning visitor instead of a brand-new browser.
 STORAGE_STATE_PATH = PROJECT_ROOT / "data" / "browser_state.json"
+
+
+def storage_state_path(airline: str) -> Path:
+    """Per-airline cookie file, so one site's session never reaches the other."""
+    return PROJECT_ROOT / "data" / f"browser_state_{airline.strip().upper()}.json"
+
 HUMAN_PAUSE_S: tuple[float, float] = (0.35, 1.4)  # between form actions
 BROWSER_ARGS: tuple[str, ...] = (
     "--disable-blink-features=AutomationControlled",

@@ -163,12 +163,12 @@ def _fares(container) -> tuple[float | None, float | None]:
 
 
 def _price_fields(container) -> dict | None:
-    """Flight kwargs for price/base_price/is_member_fare, or None if no fare."""
+    """Flight kwargs for price/base_price/member_price/is_member_fare, or None if no fare."""
     member, public = _fares(container)
     if member is not None:
-        return {"price": member, "base_price": public, "is_member_fare": True}
+        return {"price": member, "base_price": public, "member_price": member, "is_member_fare": True}
     if public is not None:
-        return {"price": public, "base_price": public, "is_member_fare": False}
+        return {"price": public, "base_price": public, "member_price": None, "is_member_fare": False}
     return None
 
 

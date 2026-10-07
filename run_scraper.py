@@ -45,7 +45,7 @@ def parse_routes(spec: str | None) -> list[tuple[str, str]]:
 
 def parse_destinations(spec: str | None) -> list[str]:
     codes = [c.strip().upper() for c in (spec or "").split(",") if c.strip()]
-    unknown = [c for c in codes if c not in config.DESTINATIONS]
+    unknown = [c for c in codes if c not in config.DESTINATIONS and c not in config.FRONTIER_AIRPORTS]
     if unknown:
         raise SystemExit(f"Unknown destination(s): {', '.join(unknown)}")
     return codes

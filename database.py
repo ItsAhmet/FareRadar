@@ -929,6 +929,30 @@ def set_setting(key: str, value, conn: sqlite3.Connection | None = None) -> None
          (key, json.dumps(value)), conn)
 
 
+def memberships(conn: sqlite3.Connection | None = None) -> dict[str, bool]:
+    """Which airline programs the owner belongs to (settings over config defaults)."""
+    stored = get_setting("memberships", {}, conn) or {}
+    return {code: bool(stored.get(code, default)) for code, default in config.DEFAULT_MEMBERSHIPS.items()}
+
+
+def reprice(airline: str, is_member: bool, conn: sqlite3.Connection | None = None) -> int:
+    """Recompute `price` (what the owner pays) for one airline from the two stored fares."""
+    if is_member:
+        sql = """UPDATE avelo_flights SET price = member_price, is_member_fare = 1
+                 WHERE airline = ? AND member_price IS NOT NULL"""
+    else:
+        sql = """UPDATE avelo_flights SET price = base_price, is_member_fare = 0
+                 WHERE airline = ? AND base_price IS NOT NULL"""
+    return _run(sql, (airline.upper(),), conn)
+
+
+def set_membership(airline: str, is_member: bool, conn: sqlite3.Connection | None = None) -> None:
+    stored = get_setting("memberships", {}, conn) or {}
+    stored[airline.upper()] = bool(is_member)
+    set_setting("memberships", stored, conn)
+    reprice(airline, is_member, conn)
+
+
 def home_costs(conn: sqlite3.Connection | None = None) -> dict[str, config.HomeCost]:
     """Per home airport: owner-set drive minutes and parking $/day over the defaults."""
     stored = get_setting("home_costs", {}, conn) or {}

@@ -419,3 +419,15 @@ def test_route_medians_and_calendar_can_be_scoped_to_airlines(conn):
     assert cal == [{"origin": "PHL", "destination": "MCO", "day": "2026-10-10", "min_price": 60, "flights": 1}]
     assert db.route_calendar(*span, conn=conn, airlines=[]) == []
     assert db.route_calendar(*span, conn=conn)[0]["min_price"] == 20
+
+
+def test_memberships_and_reprice(conn):
+    assert db.memberships(conn) == {"XP": True, "F9": False}
+    db.upsert_flights([f9(price=84.0, dd=83.0)], conn)
+    db.set_membership("f9", True, conn)
+    assert db.memberships(conn)["F9"] is True
+    row = conn.execute("SELECT price, is_member_fare FROM avelo_flights WHERE airline = 'F9'").fetchone()
+    assert (row["price"], row["is_member_fare"]) == (83.0, 1)
+    db.set_membership("F9", False, conn)
+    row = conn.execute("SELECT price, is_member_fare FROM avelo_flights WHERE airline = 'F9'").fetchone()
+    assert (row["price"], row["is_member_fare"]) == (84.0, 0)
