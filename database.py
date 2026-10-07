@@ -145,10 +145,11 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 """
 
-MIGRATIONS: dict[str, str] = {
-    "base_price": "ALTER TABLE avelo_flights ADD COLUMN base_price REAL",
-    "is_member_fare": "ALTER TABLE avelo_flights ADD COLUMN is_member_fare INTEGER NOT NULL DEFAULT 0",
-    "promo_code": "ALTER TABLE avelo_flights ADD COLUMN promo_code TEXT",
+MIGRATIONS: dict[tuple[str, str], str] = {
+    ("avelo_flights", "base_price"): "ALTER TABLE avelo_flights ADD COLUMN base_price REAL",
+    ("avelo_flights", "is_member_fare"): "ALTER TABLE avelo_flights ADD COLUMN is_member_fare INTEGER NOT NULL DEFAULT 0",
+    ("avelo_flights", "promo_code"): "ALTER TABLE avelo_flights ADD COLUMN promo_code TEXT",
+    ("scrape_runs", "status"): "ALTER TABLE scrape_runs ADD COLUMN status TEXT",  # ok | partial | failed
 }
 
 UPSERT_SQL = """
@@ -185,10 +186,13 @@ def _resolve(db_path: Path | str | None) -> Path | str:
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
-    existing = {row["name"] for row in conn.execute("PRAGMA table_info(avelo_flights)")}
-    for column, ddl in MIGRATIONS.items():
-        if column not in existing:
+    columns: dict[str, set[str]] = {}
+    for (table, column), ddl in MIGRATIONS.items():
+        if table not in columns:
+            columns[table] = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in columns[table]:
             conn.execute(ddl)
+            columns[table].add(column)
     # Seed history from current fares so trends have a starting point.
     if conn.execute("SELECT COUNT(*) FROM price_history").fetchone()[0] == 0:
         conn.execute(
@@ -573,9 +577,9 @@ def start_run(mode: str, routes: Iterable[tuple[str, str]], promo_code: str | No
 
 
 def finish_run(run_id: int, summary: dict | None = None, conn: sqlite3.Connection | None = None,
-               now: datetime | None = None) -> None:
-    _run("UPDATE scrape_runs SET finished_at = ?, summary = ? WHERE run_id = ?",
-         (_now(now), json.dumps(summary or {}), run_id), conn)
+               now: datetime | None = None, status: str = "ok") -> None:
+    _run("UPDATE scrape_runs SET finished_at = ?, summary = ?, status = ? WHERE run_id = ?",
+         (_now(now), json.dumps(summary or {}), status, run_id), conn)
 
 
 def last_runs(limit: int = 10, conn: sqlite3.Connection | None = None) -> list[dict]:
@@ -619,8 +623,13 @@ def routes_in_run(run_id: int, conn: sqlite3.Connection | None = None) -> list[t
 
 
 def previous_run_for_route(run_id: int, origin: str, destination: str, conn: sqlite3.Connection | None = None) -> int | None:
-    rows = _fetch("SELECT MAX(run_id) AS prev FROM route_day_seen WHERE run_id < ? AND origin = ? AND destination = ?",
-                  (run_id, origin.upper(), destination.upper()), conn)
+    """Latest earlier run that finished cleanly and saw this route (legacy runs have NULL status)."""
+    rows = _fetch(
+        """SELECT MAX(s.run_id) AS prev FROM route_day_seen s
+           JOIN scrape_runs r ON r.run_id = s.run_id
+           WHERE s.run_id < ? AND s.origin = ? AND s.destination = ?
+             AND r.finished_at IS NOT NULL AND COALESCE(r.status, 'ok') = 'ok'""",
+        (run_id, origin.upper(), destination.upper()), conn)
     return rows[0]["prev"] if rows and rows[0]["prev"] is not None else None
 
 

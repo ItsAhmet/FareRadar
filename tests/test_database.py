@@ -184,6 +184,7 @@ def test_runs_sightings_floors_and_watchlist(conn):
     assert db.seen_in_run(run, "ILG", "TPA", conn) == {date(2026, 10, 10): 40, date(2026, 10, 12): None}
     assert db.routes_in_run(run, conn) == [("ILG", "TPA")]
     assert db.previous_run_for_route(run, "ILG", "TPA", conn) is None
+    db.finish_run(run, {}, conn)
     run2 = db.start_run("calendar", [("ILG", "TPA")], conn=conn)
     db.record_seen(run2, "ILG", "TPA", [date(2026, 10, 10)], [], conn)
     assert db.previous_run_for_route(run2, "ILG", "TPA", conn) == run
@@ -257,3 +258,39 @@ def test_trip_candidates_list_every_flight_a_key_may_mean(conn):
     assert [f.departure_datetime.hour for f in db.trip_candidates("XP|ILG|TPA|2026-10-10|*", conn)] == [18, 8]
     assert [f.price for f in db.trip_candidates("XP|ILG|TPA|2026-10-10|08:00", conn)] == [95]
     assert db.trip_candidates("XP|ILG|TPA|2026-10-11|*", conn) == []
+
+
+def test_old_database_gains_run_status_and_keeps_rows(tmp_path):
+    path = tmp_path / "old.db"
+    raw = sqlite3.connect(path)
+    raw.executescript("""
+        CREATE TABLE scrape_runs (run_id INTEGER PRIMARY KEY AUTOINCREMENT, started_at TEXT NOT NULL,
+            finished_at TEXT, mode TEXT NOT NULL, routes TEXT NOT NULL, promo_code TEXT, summary TEXT);
+        INSERT INTO scrape_runs (started_at, finished_at, mode, routes) VALUES ('2026-09-15T16:00', '2026-09-15T16:05', 'calendar', '[]');
+        INSERT INTO scrape_runs (started_at, finished_at, mode, routes) VALUES ('2026-09-15T17:00', NULL, 'calendar', '[]');
+    """)
+    raw.commit()
+    raw.close()
+    conn = db.get_connection(path)
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(scrape_runs)")}
+    assert "status" in cols
+    assert [r["run_id"] for r in conn.execute("SELECT run_id FROM scrape_runs")] == [1, 2]
+    conn.close()
+
+
+def test_only_finished_ok_runs_are_baselines(conn):
+    day = [date(2026, 10, 10)]
+    legacy = db.start_run("calendar", [("ILG", "TPA")], conn=conn)
+    db.record_seen(legacy, "ILG", "TPA", day, [], conn)
+    conn.execute("UPDATE scrape_runs SET finished_at = '2026-09-15T16:05', status = NULL WHERE run_id = ?", (legacy,))
+    unfinished = db.start_run("calendar", [("ILG", "TPA")], conn=conn)
+    db.record_seen(unfinished, "ILG", "TPA", day, [], conn)
+    failed = db.start_run("calendar", [("ILG", "TPA")], conn=conn)
+    db.record_seen(failed, "ILG", "TPA", day, [], conn)
+    db.finish_run(failed, {}, conn, status="failed")
+    partial = db.start_run("calendar", [("ILG", "TPA")], conn=conn)
+    db.record_seen(partial, "ILG", "TPA", day, [], conn)
+    db.finish_run(partial, {}, conn, status="partial")
+    current = db.start_run("calendar", [("ILG", "TPA")], conn=conn)
+    assert db.previous_run_for_route(current, "ILG", "TPA", conn) == legacy
+    assert db.last_runs(1, conn)[0]["status"] is None   # current run not finished yet

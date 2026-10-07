@@ -56,6 +56,7 @@ def test_run_detection_end_to_end_with_two_runs():
     r1 = db.start_run("calendar", [("ILG", "TPA")], conn=conn)
     db.record_seen(r1, "ILG", "TPA", days, [flight(d, 100) for d in (2, 4, 6, 9, 11)], conn)
     first = run_detection(r1, conn)
+    db.finish_run(r1, {}, conn)
     assert kinds(first) == ["floor_fare"] * 5 and db.get_floor("ILG", "TPA", conn) == 100
 
     r2 = db.start_run("calendar", [("ILG", "TPA")], conn=conn)
@@ -68,3 +69,12 @@ def test_run_detection_end_to_end_with_two_runs():
     assert len(stored) == len(second)
     assert db.unread_event_count(conn) == len([e for e in second if e.notify])
     conn.close()
+
+
+def test_partial_runs_raise_no_sold_out():
+    prev = {date(2026, 10, 9): 79.0, date(2026, 10, 12): 89.0}
+    cur = {date(2026, 10, 9): 79.0, date(2026, 10, 12): None}
+    events, _ = detect_route("ILG", "TPA", prev, cur, None)
+    assert [e.kind for e in events if e.kind == "sold_out"] == ["sold_out"]
+    events, _ = detect_route("ILG", "TPA", prev, cur, None, allow_sold_out=False)
+    assert not [e for e in events if e.kind == "sold_out"]

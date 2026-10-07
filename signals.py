@@ -51,6 +51,7 @@ def detect_route(
     prev: dict[date, float | None] | None,
     cur: dict[date, float | None],
     floor: float | None,
+    allow_sold_out: bool = True,
 ) -> tuple[list[Event], float | None]:
     """Compare this run's sightings with the previous run's for one route.
 
@@ -81,10 +82,11 @@ def detect_route(
                                     f"{label}: sale wave — {len(drops)} of {len(common)} days down {avg:.0%} on average (from ${min(cur_priced[d] for d in drops):.0f})",
                                     {"days": [d.isoformat() for d in drops], "avg_drop": round(avg, 3)}))
 
-        for d in sorted(set(prev_priced) & {d for d, p in cur.items() if p is None}):
-            events.append(Event("sold_out", origin, destination, d,
-                                f"{label}: {d:%a %b %d} no longer bookable (was ${prev_priced[d]:.0f})",
-                                {"last_price": prev_priced[d]}))
+        if allow_sold_out:
+            for d in sorted(set(prev_priced) & {d for d, p in cur.items() if p is None}):
+                events.append(Event("sold_out", origin, destination, d,
+                                    f"{label}: {d:%a %b %d} no longer bookable (was ${prev_priced[d]:.0f})",
+                                    {"last_price": prev_priced[d]}))
 
         if floor is not None:
             for d in sorted(d for d in common if prev_priced[d] <= floor and cur_priced[d] > floor):
@@ -103,7 +105,7 @@ def detect_route(
     return events, new_floor
 
 
-def run_detection(run_id: int, conn: sqlite3.Connection | None = None) -> list[Event]:
+def run_detection(run_id: int, conn: sqlite3.Connection | None = None, allow_sold_out: bool = True) -> list[Event]:
     """Detect signals for every route this run saw and store them."""
     all_events: list[Event] = []
     for origin, dest in database.routes_in_run(run_id, conn):
@@ -111,7 +113,7 @@ def run_detection(run_id: int, conn: sqlite3.Connection | None = None) -> list[E
         prev_id = database.previous_run_for_route(run_id, origin, dest, conn)
         prev = database.seen_in_run(prev_id, origin, dest, conn) if prev_id is not None else None
         floor = database.get_floor(origin, dest, conn)
-        events, new_floor = detect_route(origin, dest, prev, cur, floor)
+        events, new_floor = detect_route(origin, dest, prev, cur, floor, allow_sold_out=allow_sold_out)
         if new_floor is not None and new_floor != floor:
             database.set_floor(origin, dest, new_floor, conn)
         all_events.extend(events)
