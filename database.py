@@ -147,6 +147,19 @@ CREATE TABLE IF NOT EXISTS settings (
     key          TEXT PRIMARY KEY,
     value        TEXT NOT NULL      -- JSON
 );
+
+-- Who flies what. nonstop: NULL = not yet known, 1 = a nonstop was seen, 0 = probed, none found.
+CREATE TABLE IF NOT EXISTS route_catalog (
+    airline         TEXT NOT NULL,
+    origin          TEXT NOT NULL,
+    destination     TEXT NOT NULL,
+    first_seen      TEXT NOT NULL,
+    last_seen       TEXT NOT NULL,
+    source          TEXT NOT NULL,
+    nonstop         INTEGER,
+    nonstop_checked TEXT,
+    PRIMARY KEY (airline, origin, destination)
+);
 """
 
 MIGRATIONS: dict[tuple[str, str], str] = {
@@ -1017,3 +1030,73 @@ def set_home_cost(code: str, drive_min: float | None, parking_per_day: float,
     stored = get_setting("home_costs", {}, conn) or {}
     stored[code.upper()] = {"drive_min": drive_min, "parking_per_day": float(parking_per_day)}
     set_setting("home_costs", stored, conn)
+
+
+# --------------------------------------------------------------------------- #
+# Route catalog (which airline flies which directional route)
+# --------------------------------------------------------------------------- #
+
+
+def upsert_catalog(airline: str, pairs: Iterable[tuple[str, str]], source: str,
+                   conn: sqlite3.Connection | None = None, now: datetime | None = None) -> int:
+    """Record that `airline` lists these directional routes now. Never removes rows:
+    a route that stops being listed simply ages out of `catalog_routes`."""
+    stamp = _now(now)
+    rows = sorted({(airline.upper(), o.strip().upper(), d.strip().upper(), stamp, stamp, source) for o, d in pairs})
+    if not rows:
+        return 0
+    _run("""INSERT INTO route_catalog (airline, origin, destination, first_seen, last_seen, source)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT (airline, origin, destination) DO UPDATE SET last_seen = excluded.last_seen, source = excluded.source""",
+         rows, conn, many=True)
+    return len(rows)
+
+
+def catalog_routes(airline: str, origins: Iterable[str] | None = None, destinations: Iterable[str] | None = None,
+                   conn: sqlite3.Connection | None = None, max_age_days: int = 45,
+                   now: datetime | None = None) -> list[tuple[str, str]]:
+    """Directional routes `airline` listed within `max_age_days`. `origins` are home airports and
+    `destinations` the far ends: a route is kept when one end is in each (either direction)."""
+    cutoff = ((now or datetime.now()) - timedelta(days=max_age_days)).isoformat(timespec="seconds")
+    rows = _fetch("""SELECT origin, destination FROM route_catalog
+                     WHERE airline = ? AND last_seen >= ? ORDER BY origin, destination""", (airline.upper(), cutoff), conn)
+    homes = {o.upper() for o in origins} if origins is not None else None
+    away = {d.upper() for d in destinations} if destinations is not None else None
+    out = []
+    for r in rows:
+        o, d = r["origin"], r["destination"]
+        if homes is not None and not (o in homes or d in homes):
+            continue
+        if away is not None and not (o in away or d in away):
+            continue
+        out.append((o, d))
+    return out
+
+
+def catalog_checked(airline: str, origin: str, conn: sqlite3.Connection | None = None) -> datetime | None:
+    """When this airline's routes from `origin` were last confirmed (None = never)."""
+    rows = _fetch("SELECT MAX(last_seen) AS seen FROM route_catalog WHERE airline = ? AND origin = ?",
+                  (airline.upper(), origin.upper()), conn)
+    return datetime.fromisoformat(rows[0]["seen"]) if rows and rows[0]["seen"] else None
+
+
+def route_nonstop(airline: str, origin: str, destination: str, conn: sqlite3.Connection | None = None,
+                  recheck_days: int = 30, now: datetime | None = None) -> bool | None:
+    """True = a nonstop was seen; False = probed recently, none found; None = unknown (or a stale "no")."""
+    rows = _fetch("SELECT nonstop, nonstop_checked FROM route_catalog WHERE airline = ? AND origin = ? AND destination = ?",
+                  (airline.upper(), origin.upper(), destination.upper()), conn)
+    if not rows or rows[0]["nonstop"] is None:
+        return None
+    if rows[0]["nonstop"]:
+        return True
+    checked = datetime.fromisoformat(rows[0]["nonstop_checked"])
+    return False if (now or datetime.now()) - checked < timedelta(days=recheck_days) else None
+
+
+def set_route_nonstop(airline: str, origin: str, destination: str, nonstop: bool,
+                      conn: sqlite3.Connection | None = None, now: datetime | None = None) -> None:
+    stamp = _now(now)
+    _run("""INSERT INTO route_catalog (airline, origin, destination, first_seen, last_seen, source, nonstop, nonstop_checked)
+            VALUES (?, ?, ?, ?, ?, 'search', ?, ?)
+            ON CONFLICT (airline, origin, destination) DO UPDATE SET nonstop = excluded.nonstop, nonstop_checked = excluded.nonstop_checked""",
+         (airline.upper(), origin.upper(), destination.upper(), stamp, stamp, 1 if nonstop else 0, stamp), conn)

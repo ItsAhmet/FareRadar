@@ -484,3 +484,39 @@ def test_set_membership_drops_that_airlines_baselines_only_when_it_changes(conn)
     assert states[w_xp]["last_total"] == 200.0
     assert db.previous_run_for_route(db.start_run("calendar", [("PHL", "MCO")], conn=conn, airline="F9"),
                                      "PHL", "MCO", conn) is None
+
+
+def test_route_catalog_round_trip_and_filters(conn):
+    t0 = datetime(2026, 10, 7, 9)
+    assert db.upsert_catalog("f9", [("PHL", "MCO"), ("mco", "phl"), ("BWI", "DEN"), ("DEN", "BWI")], "route-page", conn, now=t0) == 4
+    db.upsert_catalog("XP", [("ILG", "TPA"), ("TPA", "ILG")], "routes/all", conn, now=t0)
+    assert db.catalog_routes("F9", conn=conn, now=t0) == [("BWI", "DEN"), ("DEN", "BWI"), ("MCO", "PHL"), ("PHL", "MCO")]
+    assert db.catalog_routes("F9", origins=["PHL"], conn=conn, now=t0) == [("MCO", "PHL"), ("PHL", "MCO")]
+    assert db.catalog_routes("F9", origins=["PHL", "BWI"], destinations=["den"], conn=conn, now=t0) == [("BWI", "DEN"), ("DEN", "BWI")]
+    assert db.catalog_routes("XP", conn=conn, now=t0) == [("ILG", "TPA"), ("TPA", "ILG")]
+    assert db.catalog_checked("F9", "PHL", conn) == t0 and db.catalog_checked("F9", "ILG", conn) is None
+
+
+def test_catalog_keeps_first_seen_and_ages_out(conn):
+    t0, t1 = datetime(2026, 8, 1, 9), datetime(2026, 10, 7, 9)
+    db.upsert_catalog("F9", [("PHL", "MCO"), ("PHL", "SJU")], "route-page", conn, now=t0)
+    db.upsert_catalog("F9", [("PHL", "MCO")], "route-page", conn, now=t1)          # SJU not listed any more
+    assert db.catalog_routes("F9", conn=conn, now=t1) == [("PHL", "MCO")]           # 67-day-old row aged out
+    row = conn.execute("SELECT first_seen, last_seen FROM route_catalog WHERE destination = 'MCO'").fetchone()
+    assert row["first_seen"].startswith("2026-08-01") and row["last_seen"].startswith("2026-10-07")
+    assert db.upsert_catalog("F9", [], "route-page", conn, now=t1) == 0             # an empty fetch changes nothing
+    assert conn.execute("SELECT COUNT(*) FROM route_catalog").fetchone()[0] == 2
+
+
+def test_nonstop_flag_is_tristate_and_rechecked(conn):
+    t0 = datetime(2026, 10, 7, 9)
+    db.upsert_catalog("F9", [("BWI", "SFO"), ("PHL", "MCO")], "route-page", conn, now=t0)
+    assert db.route_nonstop("F9", "PHL", "MCO", conn, now=t0) is None
+    db.set_route_nonstop("F9", "PHL", "MCO", True, conn, now=t0)
+    db.set_route_nonstop("F9", "BWI", "SFO", False, conn, now=t0)
+    assert db.route_nonstop("F9", "PHL", "MCO", conn, now=t0) is True
+    assert db.route_nonstop("F9", "BWI", "SFO", conn, now=t0) is False
+    assert db.route_nonstop("F9", "BWI", "SFO", conn, now=datetime(2026, 11, 20)) is None   # "no" is re-probed after 30 days
+    assert db.route_nonstop("F9", "PHL", "MCO", conn, now=datetime(2027, 3, 1)) is True     # "yes" does not expire
+    db.set_route_nonstop("F9", "PHL", "DEN", True, conn, now=t0)                             # unknown route: created
+    assert db.route_nonstop("F9", "PHL", "DEN", conn, now=t0) is True

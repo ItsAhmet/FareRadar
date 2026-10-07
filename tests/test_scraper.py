@@ -671,6 +671,7 @@ def test_detail_run_clears_a_sold_out_future_day_but_skips_today(monkeypatch, tm
     left = db.query_flights(["ILG"], ["TPA"], today, later)
     assert [f.departure_datetime for f in left] == [datetime(2026, 10, 8, 19)]  # today's fare kept, Oct 10 cleared
     assert db.seen_in_run(s.run_id, "ILG", "TPA") == {later: None}  # no sighting for today
+    assert db.catalog_routes("XP") == [("ILG", "TPA")]  # the fetched schedule's routes feed the catalog
 
 
 def test_run_clears_fares_on_days_and_routes_the_schedule_no_longer_lists(monkeypatch, tmp_path):

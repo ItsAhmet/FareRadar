@@ -55,6 +55,7 @@ from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 
 import config
+import database
 import persist
 from models import Flight
 
@@ -388,6 +389,7 @@ class AveloScraper:
                 if self.promo_code:
                     log.info("promo code %s will be applied to every search", self.promo_code)
                 schedule = await self._retry(self.fetch_schedule, "schedule")
+                database.upsert_catalog("XP", schedule.keys(), "routes/all")
                 today = local_today()
                 routes = list(routes)
                 targets, report.skipped_routes = plan_targets(routes, wanted, schedule)
