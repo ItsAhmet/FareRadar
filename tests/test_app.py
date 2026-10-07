@@ -276,3 +276,58 @@ def test_frontier_only_database_shows_frontier_signals_and_appears_in_freshness(
     assert set(table["Airline"]) == {"F9"} and set(table["Route"]) == {"PHL→MCO"}
     # pinned at the query the freshness table uses (the page itself caches it across AppTests)
     assert any((r["origin"], r["destination"]) == ("PHL", "MCO") for r in database.route_freshness(["PHL"], ["MCO"]))
+
+
+def test_signal_badge_belongs_to_the_airline_that_raised_it(mock_db, monkeypatch):
+    """On a route both airlines fly, Frontier's sale and sell-out badge Frontier legs only (and Avelo's stay Avelo's)."""
+    from datetime import datetime
+    import streamlit as st
+    from models import Flight
+    import signals
+
+    st.cache_data.clear()                                            # the signal map is cached across AppTests
+    monkeypatch.setattr(config, "HOME_CODES", ["ILG", "PHL"])
+    with database.connection() as conn:                              # Avelo also flies PHL⇄MCO
+        conn.execute("""
+            INSERT INTO avelo_flights (flight_id, origin, destination, departure_datetime, arrival_datetime, price,
+                currency, duration_minutes, flight_number, base_price, is_member_fare, promo_code, timestamp_scraped)
+            SELECT replace(flight_id, 'ILG', 'PHL'),
+                   CASE origin WHEN 'ILG' THEN 'PHL' ELSE origin END,
+                   CASE destination WHEN 'ILG' THEN 'PHL' ELSE destination END,
+                   departure_datetime, arrival_datetime, price - 40, currency, duration_minutes, flight_number,
+                   base_price, is_member_fare, promo_code, timestamp_scraped
+            FROM avelo_flights WHERE origin = 'ILG' OR destination = 'ILG'
+        """)
+        out_days, back_days = (sorted({date.fromisoformat(r[0]) for r in conn.execute(
+            "SELECT DISTINCT substr(departure_datetime, 1, 10) FROM avelo_flights WHERE origin = ? AND destination = ?",
+            route)}) for route in (("PHL", "MCO"), ("MCO", "PHL")))
+    assert out_days and back_days
+
+    def frontier(origin, destination, days, price):
+        return [Flight(flight_id=f"F9CAL-{origin}-{destination}", origin=origin, destination=destination,
+                       departure_datetime=datetime(d.year, d.month, d.day), price=price, base_price=price,
+                       airline="F9") for d in days]
+
+    on_sale, sold = out_days[::2], out_days[1::2]                    # Frontier: half the days sell out, half go on sale
+    assert sold and on_sale
+    database.upsert_flights(frontier("PHL", "MCO", on_sale, 45.0) + frontier("MCO", "PHL", back_days, 45.0))
+    avelo = database.start_run("calendar", [("PHL", "MCO")])         # Avelo's newest run raised nothing
+    database.finish_run(avelo, {})
+    first = database.start_run("calendar", [("PHL", "MCO")], airline="F9")
+    database.record_seen(first, "PHL", "MCO", out_days, frontier("PHL", "MCO", out_days, 90.0))
+    signals.run_detection(first)
+    database.finish_run(first, {})
+    second = database.start_run("calendar", [("PHL", "MCO")], airline="F9")
+    database.record_seen(second, "PHL", "MCO", out_days, frontier("PHL", "MCO", on_sale, 45.0))
+    events = signals.run_detection(second)
+    database.finish_run(second, {})
+    assert {"sold_out", "sale_wave", "floor_fare"} <= {e.kind for e in events} and {e.airline for e in events} == {"F9"}
+
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    assert not at.exception, at.exception
+    st.cache_data.clear()
+    df = next(d.value for d in at.dataframe if "Add-on Fees" in d.value.columns)
+    avelo_only, frontier_only = df[df["Airlines"] == "Avelo"], df[df["Airlines"] == "Frontier"]
+    assert len(avelo_only) and (avelo_only["Signals"] == "").all(), "a Frontier signal badged an Avelo-only package"
+    assert len(frontier_only) and frontier_only["Signals"].str.contains("floor").all()   # Frontier's own badge still shows
+    assert not frontier_only["Signals"].str.contains("sold out").any()   # no Frontier fare is left on those days

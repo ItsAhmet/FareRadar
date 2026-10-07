@@ -115,12 +115,17 @@ def load_drives(query: str, airports: tuple[str, ...]) -> dict[str, tuple[float,
 
 
 @st.cache_data(show_spinner=False)
-def load_signal_map(_version: float) -> dict[tuple[str, str, str], set[str]]:
-    """(origin, destination, day) → signal kinds from the most recent run of each airline."""
-    out: dict[tuple[str, str, str], set[str]] = {}
+def load_signal_map(_version: float) -> dict[tuple[str, str, str, str], set[str]]:
+    """(airline, origin, destination, day) → signal kinds from the most recent run of each airline.
+
+    The airline is part of the key: on a route two airlines fly, one airline's sale or sell-out
+    says nothing about the other's fare. Events written before the column existed are Avelo's.
+    """
+    out: dict[tuple[str, str, str, str], set[str]] = {}
     for e in database.list_events(limit=1000, run_ids=database.latest_run_ids()):
         if e["origin"] and e["destination"] and e["day"]:
-            out.setdefault((e["origin"], e["destination"], e["day"]), set()).add(e["kind"])
+            key = ((e["airline"] or "XP").upper(), e["origin"], e["destination"], e["day"])
+            out.setdefault(key, set()).add(e["kind"])
     return out
 
 
@@ -130,7 +135,7 @@ SIGNAL_ICONS = {"floor_fare": "🔥 floor", "new_floor": "🔥 new low", "sale_w
 def signal_text(it: Itinerary, sig: dict) -> str:
     kinds: set[str] = set()
     for leg in (it.outbound, it.inbound):
-        kinds |= sig.get((leg.origin, leg.destination, leg.departure_date.isoformat()), set())
+        kinds |= sig.get((leg.airline or "XP", leg.origin, leg.destination, leg.departure_date.isoformat()), set())
     return " · ".join(SIGNAL_ICONS[k] for k in SIGNAL_ICONS if k in kinds)
 
 
