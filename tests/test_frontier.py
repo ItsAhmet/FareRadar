@@ -104,6 +104,17 @@ def test_challenge_pages_are_recognised():
     assert not frontier.is_challenge_page("<html><title>Select | Frontier Airlines</title></html>")
 
 
+@pytest.mark.parametrize("name", ["results_page_PHL_MCO.html", "calendar_page_PHL_MCO.html"])
+def test_real_frontier_pages_are_not_flagged_as_challenges(name):
+    # Task 9 Step 2 (live check, controller + owner): save a real day-search page and a calendar page
+    # (page.content(), trimmed of personal data) as tests/fixtures/frontier/<name>. Until they exist this
+    # skips; once present it pins that _CHALLENGE_MARKERS never fire on a healthy page.
+    path = FX / name
+    if not path.exists():
+        pytest.skip(f"{name} not captured yet (Task 9 Step 2 live check)")
+    assert not frontier.is_challenge_page(path.read_text())
+
+
 def test_probe_days_picks_the_cheapest_distinct_days():
     flights, _ = frontier.parse_calendar(load("lowfare_calendar_PHL_MCO_2026-11.json"), "PHL", "MCO")
     days = frontier.probe_days(flights, 3)
