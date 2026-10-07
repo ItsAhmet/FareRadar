@@ -14,6 +14,7 @@ Examples
     python run_scraper.py --routes ILG-CHS --headful       # one direction, watch the browser
     python run_scraper.py --mock                           # synthetic data, no network
     python run_scraper.py --destinations CHS --promo SAVE20 # apply a promo code on every search
+    python run_scraper.py --airlines F9 --origins PHL --destinations MCO --days 21 --mode full
 """
 from __future__ import annotations
 
@@ -61,6 +62,55 @@ def parse_origins(spec: str | None) -> list[str]:
     return list(dict.fromkeys(codes))
 
 
+def parse_airlines(spec: str | None) -> list[str]:
+    if not spec:
+        return list(config.ACTIVE_AIRLINES)
+    codes = [c.strip().upper() for c in spec.split(",") if c.strip()]
+    unknown = [c for c in codes if c not in config.KNOWN_AIRLINES]
+    if unknown:
+        raise SystemExit(f"Unknown airline(s): {', '.join(unknown)} (known: {', '.join(config.KNOWN_AIRLINES)})")
+    return list(dict.fromkeys(codes))
+
+
+def parse_promos(values: list[str] | None) -> dict[str, str]:
+    """--promo CODE applies to Avelo; --promo F9=CODE to that airline."""
+    promos: dict[str, str] = {}
+    for value in values or []:
+        airline, sep, code = value.strip().partition("=")
+        airline, code = (airline.upper(), code) if sep else ("XP", airline)
+        if airline not in config.KNOWN_AIRLINES:
+            raise SystemExit(f"Unknown airline in --promo: {value}")
+        if code.strip():
+            promos[airline] = code.strip().upper()
+    return promos
+
+
+def scraper_class(airline: str):
+    """Imported lazily so --mock works without Playwright."""
+    if airline == "F9":
+        from frontier import FrontierScraper
+        return FrontierScraper
+    from scraper import AveloScraper
+    return AveloScraper
+
+
+def routes_for(airline: str, args: argparse.Namespace) -> list[tuple[str, str]]:
+    """The directional routes one airline's scraper should visit for this request."""
+    if args.routes:
+        return parse_routes(args.routes)
+    destinations = parse_destinations(args.destinations) or None
+    origins = parse_origins(args.origins)
+    if airline == "F9":
+        import frontier
+
+        frontier.refresh_catalog(origins)
+        return database.catalog_routes("F9", origins=origins, destinations=destinations)
+    avelo = [d for d in destinations if d in config.DESTINATIONS] if destinations else None
+    if destinations and not avelo:
+        return []
+    return config.default_routes(avelo, origins)
+
+
 def build_dates(start: date, end: date | None, days: int | None) -> list[date]:
     """Inclusive date list from --start to --end, or --days long."""
     if end is not None:
@@ -81,6 +131,7 @@ def build_command(
     python: str | None = None,
     promo: str | None = None,
     origins: list[str] | None = None,
+    airlines: list[str] | None = None,
 ) -> list[str]:
     """argv for a targeted run. Used by the dashboard; tested so the UI's
     filters provably reach the scraper unchanged."""
@@ -94,6 +145,8 @@ def build_command(
     ]
     if origins:
         cmd += ["--origins", ",".join(o.upper() for o in origins)]
+    if airlines:
+        cmd += ["--airlines", ",".join(a.upper() for a in airlines)]
     if purge:
         cmd.append("--purge")
     if mock:
@@ -106,13 +159,14 @@ def build_command(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Scrape Avelo fares from your home airports (AVELO_HOME_AIRPORTS) into SQLite.")
+    p = argparse.ArgumentParser(description="Scrape fares from your home airports (AVELO_HOME_AIRPORTS) into SQLite.")
     p.add_argument("--start", type=date.fromisoformat, default=date.today(), help="First departure date (YYYY-MM-DD)")
     p.add_argument("--end", type=date.fromisoformat, help="Last departure date, inclusive (overrides --days)")
     p.add_argument("--days", type=int, default=None, help=f"How many days to cover (default {config.DAYS_AHEAD})")
     p.add_argument("--destinations", help="Comma list of destination codes, e.g. TPA,LAL (both directions)")
     p.add_argument("--routes", help="Comma list like ILG-TPA,TPA-ILG (overrides --destinations)")
     p.add_argument("--origins", help="Comma list of home airports, e.g. ILG,PHL (default: AVELO_HOME_AIRPORTS)")
+    p.add_argument("--airlines", help="Comma list of airline codes: XP (Avelo), F9 (Frontier). Default: AVELO_AIRLINES")
     p.add_argument(
         "--mode",
         choices=["calendar", "detail", "full"],
@@ -125,7 +179,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--mock-sale", type=float, default=0.0, help="With --mock: cut every fare by this fraction (0.2 = 20%% sale)")
     p.add_argument("--no-alerts", action="store_true", help="Skip signal detection and notifications after the run")
     p.add_argument("--purge", action="store_true", help="(always on) delete departed flights and prune history first")
-    p.add_argument("--promo", help="Promo code to apply on Avelo's search form for every search")
+    p.add_argument("--promo", action="append", help="Promo code for every search: CODE (Avelo) or F9=CODE; repeatable")
     p.add_argument("-v", "--verbose", action="store_true")
     return p
 
@@ -152,15 +206,28 @@ def _run(args: argparse.Namespace, log: logging.Logger) -> int:
     database.init_db()
     housekeeping = database.maintenance()
     log.info("maintenance: %s", ", ".join(f"{k}={v}" for k, v in housekeeping.items()))
-
-    if args.routes:
-        routes = parse_routes(args.routes)
-    else:
-        routes = config.default_routes(parse_destinations(args.destinations) or None, parse_origins(args.origins))
     dates = build_dates(args.start, args.end, args.days)
-    log.info("routes=%d (%s) dates=%s..%s", len(routes), ",".join(f"{o}-{d}" for o, d in routes), dates[0], dates[-1])
+    promos = parse_promos(args.promo)
+    airline_codes = ["XP"] if args.mock else parse_airlines(args.airlines)  # the mock schedule is Avelo's
 
-    run_id = database.start_run("mock" if args.mock else args.mode, routes, args.promo)
+    work = [(code, routes_for(code, args)) for code in airline_codes]
+    for code, routes in work:
+        if not routes:
+            log.info("%s: no routes for this request, skipping", code)
+    work = [(code, routes) for code, routes in work if routes]
+
+    exit_code, signal_events = 0, []
+    for index, (code, routes) in enumerate(work):
+        last = index == len(work) - 1
+        log.info("%s: routes=%d (%s) dates=%s..%s", code, len(routes), ",".join(f"{o}-{d}" for o, d in routes), dates[0], dates[-1])
+        exit_code = max(exit_code, _run_airline(code, routes, dates, promos.get(code), args, log, signal_events, last))
+    return exit_code
+
+
+def _run_airline(code: str, routes: list[tuple[str, str]], dates: list[date], promo: str | None,
+                 args: argparse.Namespace, log: logging.Logger, signal_events: list, last: bool) -> int:
+    """One airline's scrape = one scrape_runs row. Alerts are evaluated once, after the last airline."""
+    run_id = database.start_run("mock" if args.mock else args.mode, routes, promo, airline=code)
     summary: dict = {}
     status, exit_code = "failed", 1
     try:
@@ -174,35 +241,37 @@ def _run(args: argparse.Namespace, log: logging.Logger) -> int:
             summary = {"flights_written": written, "mock": True}
             status, exit_code = "ok", 0
         else:
-            from scraper import AveloScraper  # imported lazily so --mock works without Playwright
-
-            scraper = AveloScraper(headless=not args.headful and config.HEADLESS, mode=args.mode, promo_code=args.promo, run_id=run_id)
+            scraper = scraper_class(code)(headless=not args.headful and config.HEADLESS, mode=args.mode,
+                                          promo_code=promo, run_id=run_id)
             started = datetime.now()
             report = asyncio.run(scraper.run(routes, dates))
             log.info(
-                "done in %s: %d flights written, %d/%d searches ok, %d failed, %d routes skipped (not scheduled)",
-                datetime.now() - started, report.flights_written, report.succeeded, report.attempted,
+                "%s done in %s: %d flights written, %d/%d searches ok, %d failed, %d routes skipped (not scheduled)",
+                code, datetime.now() - started, report.flights_written, report.succeeded, report.attempted,
                 report.failed, len(report.skipped_routes),
             )
             if report.skipped_routes:
-                log.info("skipped (Avelo has no flights in range): %s", ", ".join(report.skipped_routes))
+                log.info("skipped (no flights in range): %s", ", ".join(report.skipped_routes))
             for failure in report.failures:
                 log.warning("failed: %s", failure)
             summary = {
                 "flights_written": report.flights_written, "attempted": report.attempted, "succeeded": report.succeeded,
                 "failed": report.failed, "skipped": report.skipped_routes, "failures": report.failures,
+                "blocked": report.blocked,
             }
-            if report.failed == 0:
+            if report.failed == 0 and not report.blocked:
                 status, exit_code = "ok", 0
             else:
                 status, exit_code = ("partial" if report.succeeded else "failed"), 1
 
         if not args.no_alerts:
-            signal_events = signals.run_detection(run_id, allow_sold_out=(status == "ok"))
-            summary["signals"] = len(signal_events)
-            summary["alerts"] = alerts.evaluate_and_deliver(run_id, signal_events)
+            events = signals.run_detection(run_id, allow_sold_out=(status == "ok"))
+            signal_events.extend(events)
+            summary["signals"] = len(events)
+            if last:
+                summary["alerts"] = alerts.evaluate_and_deliver(run_id, signal_events)
     except Exception as exc:  # noqa: BLE001 - always close the run row
-        log.exception("scrape crashed: %s", exc)
+        log.exception("%s scrape crashed: %s", code, exc)
         summary["error"] = repr(exc)[:500]
         status, exit_code = "failed", 1
     finally:
