@@ -122,3 +122,83 @@ def test_delivery_is_noop_when_unconfigured_or_offline(monkeypatch):
     monkeypatch.setattr(config, "NTFY_TOPIC", "some-topic")
     monkeypatch.setattr(config, "OFFLINE", True)
     assert alerts.notify_ntfy("t", "b") is False
+
+
+def cal(origin, dest, day, price):
+    return Flight(origin=origin, destination=dest, departure_datetime=datetime(2026, 10, day), price=price,
+                  flight_id=f"LOWFARE-{origin}-{dest}")
+
+
+def test_watch_survives_calendar_to_detail_upgrade(conn):
+    out, back = cal("ILG", "TPA", 8, 100), cal("TPA", "ILG", 11, 80)
+    db.upsert_flights([out, back], conn)
+    (it,) = build_itineraries([out], [back], GetawayQuery({"TPA"}, [WINDOW], origins=["ILG"]))
+    wid, created = alerts.watch_package(it, conn)
+    assert created
+    db.update_watch_state(wid, {"last_total": 180.0}, conn)
+    # detail run: placeholders replaced by timed rows at the same price
+    db.delete_day("ILG", "TPA", date(2026, 10, 8), conn=conn)
+    db.delete_day("TPA", "ILG", date(2026, 10, 11), conn=conn)
+    db.upsert_flights([f("ILG", "TPA", 8, 19, 100), f("TPA", "ILG", 11, 15, 80)], conn)
+    assert alerts.evaluate_packages(conn) == []
+    payload = db.list_watches("package", conn)[0]["payload"]
+    assert payload["out_trip"] == "XP|ILG|TPA|2026-10-08|19:00" and payload["in_trip"] == "XP|TPA|ILG|2026-10-11|15:00"
+
+
+def test_watch_package_refuses_duplicates(conn):
+    out, back = f("ILG", "TPA", 8, 19, 100), f("TPA", "ILG", 11, 15, 80)
+    db.upsert_flights([out, back], conn)
+    (it,) = build_itineraries([out], [back], GetawayQuery({"TPA"}, [WINDOW], origins=["ILG"]))
+    first, created1 = alerts.watch_package(it, conn)
+    second, created2 = alerts.watch_package(it, conn)
+    assert created1 and not created2 and first == second
+    assert len(db.list_watches("package", conn)) == 1
+
+
+def test_legacy_package_watch_still_resolves(conn):
+    db.upsert_flights([cal("ILG", "TPA", 8, 100), cal("TPA", "ILG", 11, 80)], conn)
+    legacy = {"out_id": "LOWFARE-ILG-TPA", "out_dep": "2026-10-08T00:00", "in_id": "LOWFARE-TPA-ILG",
+              "in_dep": "2026-10-11T00:00", "window_start": "2026-10-07T18:00", "destination": "TPA"}
+    wid = db.add_watch("package", "old", legacy, conn)
+    db.update_watch_state(wid, {"last_total": 200.0}, conn)
+    events = alerts.evaluate_packages(conn)
+    assert [e.kind for e in events] == ["price_drop"]
+
+
+def test_rule_does_not_rematch_after_upgrade_or_on_legacy_state(conn):
+    db.upsert_flights([cal("ILG", "TPA", 8, 100), cal("TPA", "ILG", 11, 80)], conn)
+    payload = alerts.rule_payload(["TPA"], Availability(2, time(18), 6, time(23, 59)), 1, 300, True, 100,
+                                  span_days=14, origins=["ILG"])
+    assert payload["origins"] == ["ILG"] and payload["allow_open_jaw"] is False
+    db.add_watch("rule", "Tampa", payload, conn)
+    today = date(2026, 10, 1)
+    assert [e.kind for e in alerts.evaluate_rules(conn, today=today)] == ["rule_match"]
+    db.delete_day("ILG", "TPA", date(2026, 10, 8), conn=conn)
+    db.upsert_flights([f("ILG", "TPA", 8, 19, 100)], conn)
+    assert alerts.evaluate_rules(conn, today=today) == []          # same trip, now with a time
+
+    legacy_id = db.add_watch("rule", "Legacy", payload, conn)
+    db.update_watch_state(legacy_id, {"matched": ["LOWFARE-ILG-TPA|2026-10-08T00:00|x|y|z"]}, conn)
+    assert alerts.evaluate_rules(conn, today=today) == []          # legacy state: baseline silently
+    assert db.list_watches("rule", conn)[1]["state"]["key_version"] == 2
+
+
+def test_rule_origins_reach_the_query_and_watched_routes(conn):
+    payload = alerts.rule_payload(["TPA"], Availability(2, time(18), 6, time(23, 59)), 1, 300, True, 100,
+                                  span_days=14, origins=["ILG", "PHL"], allow_open_jaw=True)
+    q = alerts.rule_query(payload, today=date(2026, 10, 1))
+    assert q.origins == ["ILG", "PHL"] and q.allow_open_jaw
+    old = {k: v for k, v in payload.items() if k not in ("origins", "allow_open_jaw")}
+    assert alerts.rule_query(old, today=date(2026, 10, 1)).origins == [config.PRIMARY_HOME]
+    db.add_watch("rule", "r", payload, conn)
+    assert alerts.watched_routes(conn) >= {("ILG", "TPA"), ("TPA", "ILG"), ("PHL", "TPA"), ("TPA", "PHL")}
+
+
+def test_rule_match_quotes_the_cheapest_flight_of_the_day(conn):
+    db.upsert_flights([f("ILG", "TPA", 8, 8, 100, "AVELO-ILG-TPA-AM"), f("ILG", "TPA", 8, 19, 150, "AVELO-ILG-TPA-PM"),
+                       f("TPA", "ILG", 11, 15, 80)], conn)
+    payload = alerts.rule_payload(["TPA"], Availability(2, time(6), 6, time(23, 59)), 1, 500, True, 100,
+                                  span_days=14, origins=["ILG"])
+    db.add_watch("rule", "Tampa", payload, conn)
+    events = alerts.evaluate_rules(conn, today=date(2026, 10, 1))
+    assert [e.kind for e in events] == ["rule_match"] and events[0].message.endswith("for $180")

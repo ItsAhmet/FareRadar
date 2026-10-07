@@ -24,6 +24,7 @@ from email.message import EmailMessage
 
 import config
 import database
+import trips
 from optimizer import Availability, GetawayQuery, Itinerary, find_itineraries, rank_by_price
 from netutil import open_url
 from signals import Event
@@ -40,6 +41,11 @@ ROUTE_SIGNALS = {"sale_wave", "sold_out", "floor_gone", "new_floor"}
 
 def package_key(it: Itinerary) -> dict:
     return {
+        "out_trip": trips.trip_key(it.outbound),
+        "in_trip": trips.trip_key(it.inbound),
+        "out_day": trips.day_key(it.outbound),
+        "in_day": trips.day_key(it.inbound),
+        # legacy fields, still read by the dashboard and by old payload readers
         "out_id": it.outbound.flight_id,
         "out_dep": it.outbound.departure_datetime.isoformat(timespec="minutes"),
         "in_id": it.inbound.flight_id,
@@ -68,10 +74,14 @@ def rule_payload(
     max_pair_miles: float,
     span_days: int = 60,
     holiday_extend: bool = False,
+    origins: list[str] | None = None,
+    allow_open_jaw: bool = False,
 ) -> dict:
     return {
         "holiday_extend": holiday_extend,
         "destinations": sorted(d.upper() for d in destinations),
+        "origins": list(dict.fromkeys(o.upper() for o in (origins or config.HOME_CODES))),
+        "allow_open_jaw": bool(allow_open_jaw),
         "start_weekday": availability.start_weekday,
         "start_time": availability.start_time.strftime("%H:%M"),
         "end_weekday": availability.end_weekday,
@@ -101,11 +111,28 @@ def rule_query(payload: dict, today: date | None = None) -> GetawayQuery | None:
         max_budget=float(payload["max_budget"]),
         allow_mix=bool(payload["allow_mix"]),
         max_pair_miles=float(payload["max_pair_miles"]),
+        origins=list(payload.get("origins") or [config.PRIMARY_HOME]),
+        allow_open_jaw=bool(payload.get("allow_open_jaw", False)),
     )
 
 
 def _key_str(key: dict) -> str:
-    return "|".join(str(key[k]) for k in ("out_id", "out_dep", "in_id", "in_dep", "window_start"))
+    """Rule-match identity: day-level so a calendar→detail upgrade is not a new match."""
+    return "|".join(str(key[k]) for k in ("out_day", "in_day", "window_start"))
+
+
+def watch_package(it: Itinerary, conn: sqlite3.Connection | None = None) -> tuple[int, bool]:
+    """Watch a package unless the same trip is already watched. Returns (watch_id, created)."""
+    key = package_key(it)
+    for w in database.list_watches("package", conn):
+        p = w["payload"]
+        out_k, in_k = trips.payload_trip(p, "out"), trips.payload_trip(p, "in")
+        if (out_k and in_k and p.get("window_start") == key["window_start"]
+                and trips.matches(out_k, key["out_trip"]) and trips.matches(in_k, key["in_trip"])):
+            return w["watch_id"], False
+    watch_id = database.add_watch("package", package_label(it), key, conn)
+    database.update_watch_state(watch_id, {"last_total": it.total_price}, conn)
+    return watch_id, True
 
 
 # --------------------------------------------------------------------------- #
@@ -117,8 +144,9 @@ def evaluate_packages(conn: sqlite3.Connection | None = None) -> list[Event]:
     events: list[Event] = []
     for watch in database.list_watches("package", conn):
         key, state = watch["payload"], dict(watch["state"])
-        out = database.get_flight(key["out_id"], datetime.fromisoformat(key["out_dep"]), conn)
-        back = database.get_flight(key["in_id"], datetime.fromisoformat(key["in_dep"]), conn)
+        out_k, in_k = trips.payload_trip(key, "out"), trips.payload_trip(key, "in")
+        out = database.find_trip(out_k, conn) if out_k else None
+        back = database.find_trip(in_k, conn) if in_k else None
         if out is None or back is None:
             if not state.get("unavailable"):
                 events.append(Event("watch_unavailable", None, key.get("destination"), None,
@@ -139,6 +167,9 @@ def evaluate_packages(conn: sqlite3.Connection | None = None) -> list[Event]:
                 events.append(Event("price_rise", out.origin, out.destination, out.departure_date,
                                     f"Watched: {watch['label']} rose ${total - last:.0f} to ${total:.0f}",
                                     {"watch_id": watch["watch_id"], "from": last, "to": total}, notify=False))
+        upgraded = {**key, "out_trip": trips.upgrade(out_k, out), "in_trip": trips.upgrade(in_k, back)}
+        if upgraded != key:
+            database.update_watch_payload(watch["watch_id"], upgraded, conn)
         state.update({"last_total": total, "unavailable": False, "checked_at": datetime.now().isoformat(timespec="seconds")})
         database.update_watch_state(watch["watch_id"], state, conn)
     return events
@@ -152,9 +183,14 @@ def evaluate_rules(conn: sqlite3.Connection | None = None, today: date | None = 
         if query is None:
             continue
         matches = rank_by_price(find_itineraries(query, conn))
-        keys = {_key_str(package_key(it)): it for it in matches}
+        keys: dict[str, Itinerary] = {}
+        for it in matches:  # cheapest first; keys are day-level, so keep the cheapest per day pair
+            keys.setdefault(_key_str(package_key(it)), it)
+        legacy_state = "matched" in state and state.get("key_version") != 2
         previous = set(state.get("matched", []))
-        new_keys = [k for k in keys if k not in previous]
+        # Rules saved before trip keys stored a different key format: adopt the
+        # current matches silently instead of announcing them all as new.
+        new_keys = [] if legacy_state else [k for k in keys if k not in previous]
         for k in new_keys[:max_new]:
             it = keys[k]
             events.append(Event("rule_match", it.outbound.origin, it.outbound.destination, it.outbound.departure_date,
@@ -165,7 +201,7 @@ def evaluate_rules(conn: sqlite3.Connection | None = None, today: date | None = 
                                 f"Rule '{watch['label']}': {len(new_keys) - max_new} more new matches in the app",
                                 {"watch_id": watch["watch_id"], "extra": len(new_keys) - max_new}))
         state.update({"matched": sorted(keys), "checked_at": datetime.now().isoformat(timespec="seconds"),
-                      "match_count": len(keys)})
+                      "match_count": len(keys), "key_version": 2})
         database.update_watch_state(watch["watch_id"], state, conn)
     return events
 
@@ -175,15 +211,17 @@ def watched_routes(conn: sqlite3.Connection | None = None) -> set[tuple[str, str
     for watch in database.list_watches(conn=conn):
         p = watch["payload"]
         if watch["kind"] == "rule":
+            homes = p.get("origins") or [config.PRIMARY_HOME]
             for d in p.get("destinations", []):
-                routes.add((config.PRIMARY_HOME, d))
-                routes.add((d, config.PRIMARY_HOME))
+                for home in homes:
+                    routes.add((home, d))
+                    routes.add((d, home))
         else:
-            out_id, in_id = p.get("out_id", ""), p.get("in_id", "")
-            for fid in (out_id, in_id):
-                parts = fid.split("-")
-                if len(parts) >= 3:
-                    routes.add((parts[-2], parts[-1]))
+            for leg in ("out", "in"):
+                k = trips.payload_trip(p, leg)
+                if k:
+                    tk = trips.parse(k)
+                    routes.add((tk.origin, tk.destination))
     return routes
 
 

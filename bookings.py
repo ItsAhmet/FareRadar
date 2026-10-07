@@ -13,6 +13,8 @@ from datetime import datetime
 
 import config
 import database
+import trips
+from models import Flight
 from optimizer import Itinerary
 from signals import Event
 
@@ -46,9 +48,17 @@ def fare_savings(payload: dict) -> float:
     return round(total, 2)
 
 
+def legs(payload: dict, conn: sqlite3.Connection | None = None) -> tuple[Flight | None, Flight | None]:
+    """(outbound, inbound) flights the booking refers to now; None for a missing leg."""
+    found = []
+    for leg in ("out", "in"):
+        k = trips.payload_trip(payload, leg)
+        found.append(database.find_trip(k, conn) if k else None)
+    return found[0], found[1]
+
+
 def current_total(payload: dict, conn: sqlite3.Connection | None = None) -> float | None:
-    out = database.get_flight(payload["out_id"], datetime.fromisoformat(payload["out_dep"]), conn)
-    back = database.get_flight(payload["in_id"], datetime.fromisoformat(payload["in_dep"]), conn)
+    out, back = legs(payload, conn)
     if out is None or back is None:
         return None
     return round(out.price + back.price, 2)
@@ -59,7 +69,14 @@ def evaluate_bookings(conn: sqlite3.Connection | None = None) -> list[Event]:
     events: list[Event] = []
     for b in database.list_bookings(conn):
         state = dict(b["state"])
-        now_total = current_total(b["payload"], conn)
+        payload = b["payload"]
+        out, back = legs(payload, conn)
+        now_total = round(out.price + back.price, 2) if out is not None and back is not None else None
+        if out is not None and back is not None:
+            upgraded = {**payload, "out_trip": trips.upgrade(trips.payload_trip(payload, "out"), out),
+                        "in_trip": trips.upgrade(trips.payload_trip(payload, "in"), back)}
+            if upgraded != payload:
+                database.update_booking_payload(b["booking_id"], upgraded, conn)
         if now_total is None:
             state["current_total"] = None
             database.update_booking_state(b["booking_id"], state, conn)
