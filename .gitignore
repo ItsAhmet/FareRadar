@@ -21,3 +21,4 @@ data/*.db-wal
 data/*.db-shm
 data/scrape.lock
 .superpowers/
+data/backups/
