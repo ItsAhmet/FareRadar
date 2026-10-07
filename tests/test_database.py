@@ -431,3 +431,56 @@ def test_memberships_and_reprice(conn):
     db.set_membership("F9", False, conn)
     row = conn.execute("SELECT price, is_member_fare FROM avelo_flights WHERE airline = 'F9'").fetchone()
     assert (row["price"], row["is_member_fare"]) == (84.0, 0)
+
+
+def _f9_row(conn, fid):
+    r = conn.execute("SELECT price, is_member_fare FROM avelo_flights WHERE flight_id = ?", (fid,)).fetchone()
+    return r["price"], r["is_member_fare"]
+
+
+def test_reprice_follows_owner_price_for_rows_with_one_fare(conn):
+    """The SQL rule must agree with airlines.owner_price for rows that know only one of the two fares."""
+    import airlines
+    only_program = Flight(origin="PHL", destination="MCO", departure_datetime=datetime(2026, 10, 10), price=59.0,
+                          member_price=59.0, airline="F9", flight_id="F9CAL-PHL-MCO")
+    only_public = Flight(origin="PHL", destination="MIA", departure_datetime=datetime(2026, 10, 10), price=70.0,
+                         base_price=70.0, airline="F9", flight_id="F9CAL-PHL-MIA")
+    db.upsert_flights([only_program, only_public], conn)
+    for member in (True, False, True, False):
+        db.set_membership("F9", member, conn)
+        for fid, (mp, bp) in (("F9CAL-PHL-MCO", (59.0, None)), ("F9CAL-PHL-MIA", (None, 70.0))):
+            price, flag = airlines.owner_price(member, mp, bp)
+            assert _f9_row(conn, fid) == (price, int(flag)), (fid, member)
+    assert _f9_row(conn, "F9CAL-PHL-MCO") == (59.0, 0)
+
+
+def test_set_membership_drops_that_airlines_baselines_only_when_it_changes(conn):
+    import trips
+    run_f9 = db.start_run("calendar", [("PHL", "MCO")], conn=conn, airline="F9")
+    db.finish_run(run_f9, conn=conn)
+    run_xp = db.start_run("calendar", [("ILG", "TPA")], conn=conn)
+    db.finish_run(run_xp, conn=conn)
+    days = [date(2026, 10, d) for d in (9, 10, 11, 12)]
+    db.record_seen(run_f9, "PHL", "MCO", days, [], conn)
+    db.record_seen(run_xp, "ILG", "TPA", days, [], conn)
+    db.set_floor("PHL", "MCO", 59.0, conn)
+    db.set_floor("ILG", "TPA", 79.0, conn)
+    key_f9 = str(trips.TripKey("F9", "PHL", "MCO", date(2026, 10, 9), "*"))
+    key_xp = str(trips.TripKey("XP", "ILG", "TPA", date(2026, 10, 9), "*"))
+    w_f9 = db.add_watch("package", "f9 trip", {"out_trip": key_f9, "in_trip": key_f9}, conn)
+    w_xp = db.add_watch("package", "xp trip", {"out_trip": key_xp, "in_trip": key_xp}, conn)
+    for w in (w_f9, w_xp):
+        db.update_watch_state(w, {"last_total": 200.0, "unavailable": False}, conn)
+
+    db.set_membership("F9", False, conn)           # already False: nothing changes, nothing is dropped
+    assert db.seen_in_run(run_f9, "PHL", "MCO", conn) and db.get_floor("PHL", "MCO", conn) == 59.0
+
+    db.set_membership("F9", True, conn)            # a real change: Frontier's baselines go, Avelo's stay
+    assert db.seen_in_run(run_f9, "PHL", "MCO", conn) == {}
+    assert db.get_floor("PHL", "MCO", conn) is None
+    assert db.seen_in_run(run_xp, "ILG", "TPA", conn) and db.get_floor("ILG", "TPA", conn) == 79.0
+    states = {w["watch_id"]: w["state"] for w in db.list_watches("package", conn)}
+    assert "last_total" not in states[w_f9] and states[w_f9]["unavailable"] is False
+    assert states[w_xp]["last_total"] == 200.0
+    assert db.previous_run_for_route(db.start_run("calendar", [("PHL", "MCO")], conn=conn, airline="F9"),
+                                     "PHL", "MCO", conn) is None

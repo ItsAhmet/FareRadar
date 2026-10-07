@@ -17,12 +17,31 @@ from __future__ import annotations
 import logging
 import sqlite3
 from collections.abc import Iterable
+from dataclasses import replace
 from datetime import date
 
+import airlines
 import database
 from models import Flight
 
 log = logging.getLogger(__name__)
+
+
+def owner_priced(flights: Iterable[Flight], conn: sqlite3.Connection | None = None) -> list[Flight]:
+    """The flights with `price` and `is_member_fare` set by the owner's current membership in each airline.
+
+    A parser reports the fares the site shows; what the owner pays depends on membership (airlines.owner_price),
+    which can change between scrapes, so every save applies it. Flights with no fare at all are left as parsed.
+    """
+    member = database.memberships(conn)
+    out = []
+    for f in flights:
+        if f.member_price is None and f.base_price is None:
+            out.append(f)
+            continue
+        price, is_member = airlines.owner_price(member.get(f.airline, False), f.member_price, f.base_price)
+        out.append(f if (price, is_member) == (f.price, f.is_member_fare) else replace(f, price=price, is_member_fare=is_member))
+    return out
 
 
 def save_calendar(run_id: int | None, origin: str, dest: str, covered_days: Iterable[date], flights: list[Flight],
@@ -33,6 +52,7 @@ def save_calendar(run_id: int | None, origin: str, dest: str, covered_days: Iter
     that rendered but parsed to zero fares is not an answer, so callers leave it out.
     """
     covered = sorted(set(covered_days))
+    flights = owner_priced(flights, conn)
     priced = {f.departure_date for f in flights}
     written = database.upsert_flights(flights, conn)
     for day in covered:
@@ -49,6 +69,7 @@ def save_calendar(run_id: int | None, origin: str, dest: str, covered_days: Iter
 def save_day(run_id: int | None, origin: str, dest: str, day: date, flights: list[Flight],
              conn: sqlite3.Connection | None = None, airline: str = "XP") -> int:
     """Detail result for one day: it replaces every stored row for that day."""
+    flights = owner_priced(flights, conn)
     database.delete_day(origin, dest, day, conn=conn, airline=airline)
     written = database.upsert_flights(flights, conn)
     if run_id is not None:

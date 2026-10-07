@@ -936,21 +936,65 @@ def memberships(conn: sqlite3.Connection | None = None) -> dict[str, bool]:
 
 
 def reprice(airline: str, is_member: bool, conn: sqlite3.Connection | None = None) -> int:
-    """Recompute `price` (what the owner pays) for one airline from the two stored fares."""
+    """Recompute `price` (what the owner pays) for one airline from the two stored fares.
+
+    Mirrors airlines.owner_price: a member takes the program fare, anyone else the public fare, and a row that
+    knows only one fare uses it either way. `is_member_fare` is set only when the price is the program fare.
+    """
     if is_member:
-        sql = """UPDATE avelo_flights SET price = member_price, is_member_fare = 1
-                 WHERE airline = ? AND member_price IS NOT NULL"""
+        sql = """UPDATE avelo_flights
+                 SET price = COALESCE(member_price, base_price), is_member_fare = (member_price IS NOT NULL)
+                 WHERE airline = ? AND COALESCE(member_price, base_price) IS NOT NULL"""
     else:
-        sql = """UPDATE avelo_flights SET price = base_price, is_member_fare = 0
-                 WHERE airline = ? AND base_price IS NOT NULL"""
+        sql = """UPDATE avelo_flights
+                 SET price = COALESCE(base_price, member_price), is_member_fare = 0
+                 WHERE airline = ? AND COALESCE(base_price, member_price) IS NOT NULL"""
     return _run(sql, (airline.upper(),), conn)
 
 
+def _trip_airline(key: str) -> str | None:
+    try:
+        return trips.parse(key).airline
+    except ValueError:
+        return None
+
+
+def reset_baselines(airline: str, conn: sqlite3.Connection | None = None) -> None:
+    """Forget what earlier runs saw of one airline, so a change of price basis raises no false signal.
+
+    Signals compare a run with the run before it, and a route floor or a watched package total is a fare seen
+    earlier; all of them were priced under the old membership. Drops the airline's route_day_seen rows and the
+    floors of the routes they covered (route_floor has no airline column, so a route two airlines fly loses its
+    floor too, and the next run sets it again), and the stored total of package watches with a leg on this airline.
+    """
+    code = airline.upper()
+    routes = _fetch("""SELECT DISTINCT s.origin, s.destination FROM route_day_seen s
+                       JOIN scrape_runs r ON r.run_id = s.run_id WHERE r.airline = ?""", (code,), conn)
+    _run("DELETE FROM route_floor WHERE origin = ? AND destination = ?",
+         [(r["origin"], r["destination"]) for r in routes], conn, many=True)
+    _run("DELETE FROM route_day_seen WHERE run_id IN (SELECT run_id FROM scrape_runs WHERE airline = ?)", (code,), conn)
+    for watch in list_watches("package", conn):
+        legs = [trips.payload_trip(watch["payload"], leg) for leg in ("out", "in")]
+        if "last_total" in watch["state"] and any(k and _trip_airline(k) == code for k in legs):
+            state = {k: v for k, v in watch["state"].items() if k != "last_total"}
+            update_watch_state(watch["watch_id"], state, conn)
+
+
 def set_membership(airline: str, is_member: bool, conn: sqlite3.Connection | None = None) -> None:
+    """Record whether the owner is in an airline's program and reprice its stored fares.
+
+    A change of basis makes the airline's earlier sightings (route_day_seen) incomparable with the next scrape,
+    so they are dropped when the value actually changes: the next run then has no baseline and signals nothing.
+    The route floors are cleared too, as is the stored package total of watches, see `reset_baselines`.
+    """
+    code = airline.upper()
     stored = get_setting("memberships", {}, conn) or {}
-    stored[airline.upper()] = bool(is_member)
+    changed = memberships(conn).get(code) != bool(is_member)
+    stored[code] = bool(is_member)
     set_setting("memberships", stored, conn)
-    reprice(airline, is_member, conn)
+    reprice(code, is_member, conn)
+    if changed:
+        reset_baselines(code, conn)
 
 
 def home_costs(conn: sqlite3.Connection | None = None) -> dict[str, config.HomeCost]:

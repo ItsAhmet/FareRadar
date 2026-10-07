@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from pathlib import Path
 
 import pytest
 
@@ -134,3 +135,31 @@ def test_one_time_detail_row_still_shadows_the_calendar_placeholder(conn):
     persist.save_day(None, "ILG", "TPA", day, flights, conn)
     persist.save_calendar(None, "ILG", "TPA", [day], [cal(10, 129)], conn)
     assert [r[0] for r in conn.execute("SELECT flight_id FROM avelo_flights")] == ["AVELO-ILG-TPA"]
+
+
+def test_avelo_save_prices_by_membership_and_survives_a_rescrape(conn):
+    """Leaving Avelo PLUS stores the public fare, and the next scrape must not put the member fare back."""
+    day = date(2026, 10, 12)
+    html = (Path(__file__).parent / "fixtures" / "select_page_bundles.html").read_text()
+    parsed = scraper.parse_select_page(html, "TPA", "ILG", day)
+    persist.save_day(None, "TPA", "ILG", day, parsed, conn)
+    assert conn.execute("SELECT price, is_member_fare FROM avelo_flights").fetchone()[:] == (110.0, 1)
+    db.set_membership("XP", False, conn)
+    assert conn.execute("SELECT price, is_member_fare FROM avelo_flights").fetchone()[:] == (147.0, 0)
+    run = db.start_run("detail", [("TPA", "ILG")], conn=conn)
+    persist.save_day(run, "TPA", "ILG", day, scraper.parse_select_page(html, "TPA", "ILG", day), conn)
+    assert conn.execute("SELECT price, is_member_fare FROM avelo_flights").fetchone()[:] == (147.0, 0)
+    assert db.seen_in_run(run, "TPA", "ILG", conn) == {day: 147.0}
+    db.set_membership("XP", True, conn)
+    persist.save_day(None, "TPA", "ILG", day, scraper.parse_select_page(html, "TPA", "ILG", day), conn)
+    assert conn.execute("SELECT price, is_member_fare FROM avelo_flights").fetchone()[:] == (110.0, 1)
+
+
+def test_calendar_save_applies_membership_to_every_row(conn):
+    db.set_membership("XP", False, conn)
+    f = Flight(origin="ILG", destination="TPA", departure_datetime=datetime(2026, 10, 9), price=79.0, base_price=99.0,
+               member_price=79.0, is_member_fare=True, flight_id="LOWFARE-ILG-TPA")
+    run = db.start_run("calendar", [("ILG", "TPA")], conn=conn)
+    persist.save_calendar(run, "ILG", "TPA", [date(2026, 10, 9)], [f], conn)
+    assert conn.execute("SELECT price, is_member_fare FROM avelo_flights").fetchone()[:] == (99.0, 0)
+    assert db.seen_in_run(run, "ILG", "TPA", conn) == {date(2026, 10, 9): 99.0}
