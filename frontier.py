@@ -1,4 +1,5 @@
-"""Frontier Airlines: pure parsers over the JSON its booking site embeds, plus (Task 7) a thin browser driver.
+"""Frontier Airlines: pure parsers over the JSON its booking site embeds, plus a thin browser driver
+and the route-catalog refresh.
 
 How Frontier's site works (probed 2026-10-06, fixtures in tests/fixtures/frontier/):
 * `booking.flyfrontier.com/Flight/InternalSelect?o1=PHL&d1=MCO&dd1=Nov 12, 2026&ADT=1&mon=true` renders a
@@ -13,11 +14,20 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import date, datetime, time
+import urllib.request
+from collections.abc import Callable, Iterable
+from datetime import date, datetime, time, timedelta
+
+from playwright.async_api import TimeoutError as PlaywrightTimeout
+from playwright.async_api import async_playwright
 
 import airlines
-from browser import ScrapeError
+import config
+import database
+import persist
+from browser import BaseScraper, BlockedError, ScrapeError, ScrapeReport, answerable_days, local_today
 from models import Flight
+from netutil import open_url
 
 log = logging.getLogger(__name__)
 
@@ -150,3 +160,196 @@ def probe_days(flights: list[Flight], limit: int) -> list[date]:
     for f in flights:
         cheapest[f.departure_date] = min(f.price, cheapest.get(f.departure_date, float("inf")))
     return sorted(sorted(cheapest, key=lambda d: (cheapest[d], d))[:limit])
+
+
+# --------------------------------------------------------------------------- #
+# Route catalog
+# --------------------------------------------------------------------------- #
+
+
+def _http_get(url: str) -> str:
+    request = urllib.request.Request(url, headers={"User-Agent": config.USER_AGENTS[0], "Accept-Language": "en-US,en;q=0.9"})
+    with open_url(request, 20) as response:
+        return response.read().decode("utf-8", "replace")
+
+
+def refresh_catalog(origins: Iterable[str], conn=None, max_age_days: int = 7, now: datetime | None = None,
+                    fetch: Callable[[str], str] | None = None) -> int:
+    """Re-read Frontier's public route pages for home airports whose catalog is older than `max_age_days`.
+
+    Never removes routes: an unreachable or changed page writes nothing, and routes that stop being listed
+    age out of `database.catalog_routes` on their own.
+    """
+    if fetch is None:
+        if config.OFFLINE:
+            return 0
+        fetch = _http_get
+    now = now or datetime.now()
+    written = 0
+    for origin in origins:
+        origin = origin.strip().upper()
+        slug = config.FRONTIER_ROUTE_PAGES.get(origin)
+        if not slug:
+            continue
+        checked = database.catalog_checked(AIRLINE, origin, conn)
+        if checked is not None and now - checked < timedelta(days=max_age_days):
+            continue
+        try:
+            destinations = parse_routes(fetch(config.FRONTIER_ROUTES_URL.format(slug=slug)), origin)
+        except Exception as exc:  # noqa: BLE001 - the catalog is best-effort; keep what we have
+            log.warning("Frontier route page for %s unavailable: %s", origin, exc)
+            continue
+        if not destinations:
+            log.warning("Frontier route page for %s listed no destinations; keeping the stored catalog", origin)
+            continue
+        pairs = [(origin, d) for d in destinations] + [(d, origin) for d in destinations]
+        written += database.upsert_catalog(AIRLINE, pairs, "route-page", conn, now=now)
+    return written
+
+
+# --------------------------------------------------------------------------- #
+# Browser driver
+# --------------------------------------------------------------------------- #
+
+_FLIGHT_DATA_READY = "window.FlightDataJson && window.FlightDataJson.journeys"
+_FLIGHT_DATA_READ = "JSON.parse(JSON.stringify(window.FlightDataJson))"
+
+
+class FrontierScraper(BaseScraper):
+    airline = AIRLINE
+
+    def __init__(self, *args, member: bool | None = None, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.member = database.memberships().get(AIRLINE, False) if member is None else member
+        self._blocked_streak = 0
+
+    async def run(self, routes: Iterable[tuple[str, str]], dates: Iterable[date]) -> ScrapeReport:
+        """Scrape every route for every future date, writing to SQLite as it goes."""
+        wanted, today, report = set(dates), local_today(), ScrapeReport()
+        if not any(d > today for d in wanted):
+            return report
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(headless=self.headless, args=list(config.BROWSER_ARGS))
+            try:
+                await self._new_page(browser)
+                await self.warm_up()
+                await self._run_routes(list(routes), wanted, today, report)
+            finally:
+                await browser.close()
+        return report
+
+    async def warm_up(self) -> None:
+        """Land on the home page first, as a person would, so the booking site sees a normal referrer and cookies."""
+        await self.page.goto(config.FRONTIER_HOME_URL, wait_until="domcontentloaded")
+        await self._human_pause()
+
+    async def _run_routes(self, routes: list[tuple[str, str]], wanted: set[date], today: date, report: ScrapeReport) -> None:
+        future = sorted(d for d in wanted if d > today)
+        for origin, dest in routes:
+            origin, dest = origin.upper(), dest.upper()
+            if self._blocked_streak >= 2:
+                report.blocked = True
+                log.error("Frontier is challenging us; stopping this airline for the run")
+                break
+            known = database.route_nonstop(AIRLINE, origin, dest)
+            if known is False:
+                log.info("%s→%s: no Frontier nonstop (rechecked monthly), skipping", origin, dest)
+                continue
+
+            months: list[tuple[list[date], list[Flight]]] = []
+            calendar_flights: list[Flight] = []
+            if self.mode in ("calendar", "full"):
+                for anchor in sorted({min(d for d in future if (d.year, d.month) == ym) for ym in {(d.year, d.month) for d in future}}):
+                    flights, answered = await self._attempt(report, f"{origin}-{dest} calendar {anchor:%b %Y}",
+                                                            self.scrape_calendar_month, origin, dest, anchor) or ([], [])
+                    flights = [self._tag(f) for f in flights if f.departure_date in wanted and f.departure_date > today]
+                    months.append((answerable_days(answered, wanted, today), flights))
+                    calendar_flights.extend(flights)
+                    if self._blocked_streak >= 2:
+                        break
+
+            if self.mode == "detail":
+                days = future
+            elif self.mode == "full":
+                days = sorted({f.departure_date for f in calendar_flights})
+            else:
+                days = probe_days(calendar_flights, config.FRONTIER_PROBE_DAYS) if known is None else []
+
+            searched, no_nonstop = 0, set()
+            for day in days:
+                if self._blocked_streak >= 2:
+                    break
+                flights = await self._attempt(report, f"{origin}-{dest} {day}", self.scrape_day, origin, dest, day)
+                if flights is None:
+                    continue
+                searched += 1
+                flights = [self._tag(f) for f in flights]
+                report.flights_written += persist.save_day(self.run_id, origin, dest, day, flights, airline=AIRLINE)
+                if not flights:
+                    no_nonstop.add(day)  # searched just now: the calendar's fare that day is a connection
+                elif known is not True:
+                    database.set_route_nonstop(AIRLINE, origin, dest, True)
+                    known = True
+                log.info("F9 %s→%s %s: %d nonstop(s)", origin, dest, day, len(flights))
+
+            if known is None and searched:
+                database.set_route_nonstop(AIRLINE, origin, dest, False)
+                log.info("F9 %s→%s: %d day(s) searched, no nonstop — treated as connecting-only", origin, dest, searched)
+            if known is True:
+                for covered, flights in months:
+                    flights = [f for f in flights if f.departure_date not in no_nonstop]
+                    report.flights_written += persist.save_calendar(self.run_id, origin, dest, covered, flights, airline=AIRLINE)
+
+    async def _attempt(self, report: ScrapeReport, tag: str, fn, *args):
+        """One counted search: returns its result, or None after recording the failure."""
+        report.attempted += 1
+        try:
+            result = await self._retry(fn, tag.replace(" ", "-"), *args)
+            report.succeeded += 1
+            self._blocked_streak = 0
+            await self._save_state()
+            return result
+        except BlockedError as exc:
+            self._blocked_streak += 1
+            await self._snapshot(tag.replace(" ", "-"), 0)
+            report.fail(f"F9 {tag}: blocked ({exc})")
+        except Exception as exc:  # noqa: BLE001 - keep the loop alive
+            self._blocked_streak = 0
+            report.fail(f"F9 {tag}: {exc}")
+        finally:
+            await self._polite_delay()
+        return None
+
+    async def scrape_calendar_month(self, origin: str, dest: str, anchor: date) -> tuple[list[Flight], list[date]]:
+        """The month calendar containing `anchor`: lowest Discount Den total per day."""
+        page = self.page
+        url = airlines.frontier_search_url(origin, dest, anchor, calendar=True, promo=self.promo_code or "")
+        try:
+            async with page.expect_response(lambda r: config.FRONTIER_CALENDAR_ENDPOINT in r.url) as info:
+                await page.goto(url, wait_until="domcontentloaded")
+            payload = await (await info.value).json()
+        except PlaywrightTimeout:
+            if is_challenge_page(await page.content()):
+                raise BlockedError("challenge page instead of the calendar") from None
+            raise
+        return parse_calendar(payload, origin, dest, member=self.member)
+
+    async def scrape_day(self, origin: str, dest: str, day: date) -> list[Flight]:
+        """One day's search: every nonstop with its times and both fares ([] when the day has none)."""
+        page = self.page
+        await page.goto(airlines.frontier_search_url(origin, dest, day, promo=self.promo_code or ""), wait_until="domcontentloaded")
+        try:
+            await page.wait_for_function(_FLIGHT_DATA_READY)
+        except PlaywrightTimeout:
+            if is_challenge_page(await page.content()):
+                raise BlockedError("challenge page instead of results") from None
+            raise ScrapeError("results page has no FlightDataJson (layout may have changed)") from None
+        payload = await page.evaluate(_FLIGHT_DATA_READ)
+        if not select_has_flights(payload):
+            # A results page with no flight of any kind is not "no nonstop today": every day we search was priced
+            # by the calendar, so this is a bad page. Raising makes _attempt count a failure: nothing is deleted
+            # and an unknown route is not marked connecting-only. Only a page WITH flights, none nonstop, gives [].
+            raise ScrapeError("results page lists no flights at all on a day the calendar priced")
+        if self.promo_code:
+            self.promo_applied = True
+        return parse_select(payload, origin, dest, day, member=self.member)
