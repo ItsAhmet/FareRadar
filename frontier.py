@@ -33,6 +33,10 @@ log = logging.getLogger(__name__)
 
 AIRLINE = "F9"
 _F9 = airlines.get(AIRLINE)
+# UNVERIFIED: no real Frontier challenge page has been captured (the 2026-10-06 spike saw none on 5 loads), so these
+# are guesses and tests/fixtures/frontier/ has no challenge fixture. A missed marker is safe for the data (the page
+# raises a plain ScrapeError: nothing deleted, no sighting) but the run no longer stops after two blocks. When a
+# challenge is seen live (plan Task 9 Step 2), save its HTML as a fixture and correct this tuple.
 _CHALLENGE_MARKERS = ("px-captcha", "press &amp; hold", "press & hold", "access denied", "are you a robot", "perimeterx")
 _ROUTE_PAIR = re.compile(r'"originAirportCode":"([A-Z]{3})","destinationAirportCode":"([A-Z]{3})"')
 

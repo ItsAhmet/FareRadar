@@ -98,6 +98,7 @@ def test_route_pages_list_destinations_in_app_codes():
 
 
 def test_challenge_pages_are_recognised():
+    # Hand-written HTML: the markers are unverified until a real challenge page is captured (see _CHALLENGE_MARKERS).
     assert frontier.is_challenge_page('<div id="px-captcha"></div><p>Press &amp; Hold to confirm you are a human</p>')
     assert frontier.is_challenge_page("<h1>Access Denied</h1>")
     assert not frontier.is_challenge_page("<html><title>Select | Frontier Airlines</title></html>")
