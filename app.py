@@ -732,7 +732,7 @@ def alerts_tab() -> None:
     latest = [e for e in latest if e["kind"] in SIGNAL_ICONS][:40]
     if latest:
         st.dataframe(
-            pd.DataFrame([{"Kind": SIGNAL_ICONS[e["kind"]], "Route": f"{e['origin']}→{e['destination']}", "Day": e["day"], "Detail": e["message"]} for e in latest]),
+            pd.DataFrame([{"Kind": SIGNAL_ICONS[e["kind"]], "Airline": e["airline"] or "", "Route": f"{e['origin']}→{e['destination']}", "Day": e["day"], "Detail": e["message"]} for e in latest]),
             hide_index=True, width="stretch",
         )
     else:

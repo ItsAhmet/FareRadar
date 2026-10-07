@@ -464,7 +464,8 @@ def test_set_membership_drops_that_airlines_baselines_only_when_it_changes(conn)
     days = [date(2026, 10, d) for d in (9, 10, 11, 12)]
     db.record_seen(run_f9, "PHL", "MCO", days, [], conn)
     db.record_seen(run_xp, "ILG", "TPA", days, [], conn)
-    db.set_floor("PHL", "MCO", 59.0, conn)
+    db.set_floor("PHL", "MCO", 59.0, conn, airline="F9")
+    db.set_floor("PHL", "MCO", 69.0, conn)             # Avelo's floor on a route both fly
     db.set_floor("ILG", "TPA", 79.0, conn)
     key_f9 = str(trips.TripKey("F9", "PHL", "MCO", date(2026, 10, 9), "*"))
     key_xp = str(trips.TripKey("XP", "ILG", "TPA", date(2026, 10, 9), "*"))
@@ -474,11 +475,12 @@ def test_set_membership_drops_that_airlines_baselines_only_when_it_changes(conn)
         db.update_watch_state(w, {"last_total": 200.0, "unavailable": False}, conn)
 
     db.set_membership("F9", False, conn)           # already False: nothing changes, nothing is dropped
-    assert db.seen_in_run(run_f9, "PHL", "MCO", conn) and db.get_floor("PHL", "MCO", conn) == 59.0
+    assert db.seen_in_run(run_f9, "PHL", "MCO", conn) and db.get_floor("PHL", "MCO", conn, airline="F9") == 59.0
 
     db.set_membership("F9", True, conn)            # a real change: Frontier's baselines go, Avelo's stay
     assert db.seen_in_run(run_f9, "PHL", "MCO", conn) == {}
-    assert db.get_floor("PHL", "MCO", conn) is None
+    assert db.get_floor("PHL", "MCO", conn, airline="F9") is None
+    assert db.get_floor("PHL", "MCO", conn) == 69.0
     assert db.seen_in_run(run_xp, "ILG", "TPA", conn) and db.get_floor("ILG", "TPA", conn) == 79.0
     states = {w["watch_id"]: w["state"] for w in db.list_watches("package", conn)}
     assert "last_total" not in states[w_f9] and states[w_f9]["unavailable"] is False
@@ -608,3 +610,34 @@ def test_route_medians_are_keyed_by_airline(conn):
     med = db.route_medians(["PHL"], ["MCO"], date(2026, 10, 1), date(2026, 10, 31), conn=conn)
     assert med == {("XP", "PHL", "MCO"): 100, ("F9", "PHL", "MCO"): 60}
     assert db.route_medians(["PHL"], ["MCO"], date(2026, 10, 1), date(2026, 10, 31), conn=conn, airlines=["F9"]) == {("F9", "PHL", "MCO"): 60}
+
+
+def test_floors_are_per_airline_and_old_floors_survive(tmp_path):
+    path = tmp_path / "old.db"
+    db.get_connection(path).close()
+    raw = sqlite3.connect(path)
+    raw.executescript("""
+        DROP TABLE route_floor;
+        CREATE TABLE route_floor (origin TEXT NOT NULL, destination TEXT NOT NULL, floor_price REAL NOT NULL,
+            seen_at TEXT NOT NULL, PRIMARY KEY (origin, destination));
+        INSERT INTO route_floor VALUES ('ILG', 'TPA', 49, '2026-10-01T03:15:00');
+    """)
+    raw.commit()
+    raw.close()
+    conn = db.get_connection(path)
+    assert db.get_floor("ILG", "TPA", conn) == 49 and db.get_floor("ILG", "TPA", conn, airline="F9") is None
+    db.set_floor("ILG", "TPA", 19, conn, airline="f9")
+    assert (db.get_floor("ILG", "TPA", conn), db.get_floor("ILG", "TPA", conn, airline="F9")) == (49, 19)
+    conn.close()
+    conn = db.get_connection(path)                                  # second open: no rebuild, nothing lost
+    assert conn.execute("SELECT COUNT(*) FROM route_floor").fetchone()[0] == 2
+    conn.close()
+
+
+def test_events_store_their_airline(conn):
+    from signals import Event
+
+    db.add_events(None, [Event("sale_wave", "PHL", "MCO", date(2026, 11, 12), "m", airline="F9"),
+                         Event("rule_match", None, None, None, "watch-level")], conn)
+    rows = {r["kind"]: r["airline"] for r in db.list_events(conn=conn)}
+    assert rows == {"sale_wave": "F9", "rule_match": None}

@@ -106,18 +106,30 @@ def _fare_run(conn, airline, price, fid, origin="BWI", dest="TPA"):
     return run
 
 
-def test_frontier_runs_raise_no_signals_and_leave_the_avelo_floor_alone():
-    # route_floor and the events feed have no airline column until Phase 3: a Frontier run on a route both
-    # airlines fly must not overwrite Avelo's floor or push an "Avelo sale" for a Frontier fare
+def test_frontier_runs_raise_frontier_signals_and_leave_the_avelo_floor_alone():
+    # on a route both airlines fly, a Frontier fare must not overwrite Avelo's floor or be reported as Avelo's
+    # (and the other way round)
     conn = db.get_connection(":memory:")
+    floors = lambda: (db.get_floor("BWI", "TPA", conn), db.get_floor("BWI", "TPA", conn, airline="F9"))  # noqa: E731
     run_detection(_fare_run(conn, "XP", 80, "LOWFARE-BWI-TPA"), conn)
-    assert db.get_floor("BWI", "TPA", conn) == 80
+    assert floors() == (80, None)
     f9 = _fare_run(conn, "F9", 40, "F9CAL-BWI-TPA")
-    assert run_detection(f9, conn) == []
-    assert db.get_floor("BWI", "TPA", conn) == 80 and db.list_events(run_id=f9, conn=conn) == []
+    first = run_detection(f9, conn)
+    assert kinds(first) == ["floor_fare"] * 4 and floors() == (80, 40)   # Frontier's first sighting: quiet, its own floor
+    assert {e["airline"] for e in db.list_events(run_id=f9, conn=conn)} == {"F9"}
     events = run_detection(_fare_run(conn, "XP", 70, "LOWFARE-BWI-TPA"), conn)
-    assert "new_floor" in kinds(events) and db.get_floor("BWI", "TPA", conn) == 70   # Avelo's own new low is reported
+    assert "new_floor" in kinds(events) and floors() == (70, 40)         # Avelo's own new low; 70 is no low for Frontier
+    assert all(e.airline == "XP" and e.message.startswith("Avelo BWI→TPA") for e in events)
+    assert "sale_wave" not in kinds(events)                              # 80 → 70 is compared with Avelo's 80, not Frontier's 40
+    sale = run_detection(_fare_run(conn, "F9", 20, "F9CAL-BWI-TPA"), conn)
+    assert {"new_floor", "sale_wave"} <= set(kinds(sale)) and floors() == (70, 20)
+    assert all(e.airline == "F9" and e.message.startswith("Frontier BWI→TPA") for e in sale)
     conn.close()
+
+
+def test_detect_route_labels_default_to_avelo():
+    events, _ = detect_route("ILG", "TPA", None, {D(2): 53.0}, None)
+    assert [(e.airline, e.message) for e in events] == [("XP", "Avelo ILG→TPA (Tampa): Fri Oct 02 at the $53 floor fare")]
 
 
 def test_run_airline_and_unknown_runs():
@@ -125,4 +137,29 @@ def test_run_airline_and_unknown_runs():
     run = db.start_run("calendar", [("BWI", "TPA")], airline="F9", conn=conn)
     assert db.run_airline(run, conn) == "F9" and db.run_airline(999, conn) is None
     assert run_detection(999, conn) == []
+    conn.close()
+
+
+def test_each_airline_has_its_own_floor_and_labels():
+    conn = db.get_connection(":memory:")
+    days = [D(2), D(4), D(6), D(9), D(11)]
+
+    def priced(airline, price):
+        return [Flight(airline=airline, origin="PHL", destination="MCO", departure_datetime=datetime(2026, 10, d.day),
+                       price=price, flight_id=f"{airline}CAL") for d in days]
+
+    xp = db.start_run("calendar", [("PHL", "MCO")], conn=conn)
+    db.record_seen(xp, "PHL", "MCO", days, priced("XP", 100), conn)
+    run_detection(xp, conn)
+    db.finish_run(xp, {}, conn)
+    f9_run = db.start_run("calendar", [("PHL", "MCO")], conn=conn, airline="F9")
+    db.record_seen(f9_run, "PHL", "MCO", days, priced("F9", 40), conn)
+    events = run_detection(f9_run, conn)
+    assert events and all(e.airline == "F9" and e.message.startswith("Frontier ") for e in events)
+    assert "new_floor" not in kinds(events)                          # 40 is Frontier's first floor, not a new low for Avelo
+    assert (db.get_floor("PHL", "MCO", conn), db.get_floor("PHL", "MCO", conn, airline="F9")) == (100, 40)
+    db.finish_run(f9_run, {}, conn)
+    xp2 = db.start_run("calendar", [("PHL", "MCO")], conn=conn)
+    db.record_seen(xp2, "PHL", "MCO", days, priced("XP", 100), conn)
+    assert "sale_wave" not in kinds(run_detection(xp2, conn))        # Avelo compares with Avelo's run, not Frontier's
     conn.close()

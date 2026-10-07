@@ -249,9 +249,8 @@ def test_day_only_watch_with_no_fitting_flight_is_unavailable_not_pinned(conn):
     assert db.list_watches("package", conn)[0]["payload"]["out_trip"] == "XP|ILG|TPA|2026-10-07|20:00"
 
 
-def test_frontier_fare_drop_is_not_pushed_as_an_avelo_sale(monkeypatch):
-    # saved rule: any home airport -> MCO; a Frontier-only price drop on PHL-MCO used to be pushed
-    # under the title "Avelo sale on a watched route"
+def test_frontier_fare_drop_is_raised_as_a_frontier_sale():
+    # a Frontier-only price drop on PHL-MCO is Frontier's signal: it names Frontier and carries its airline
     import signals
     from datetime import timedelta
     conn = db.get_connection(":memory:")
@@ -271,12 +270,9 @@ def test_frontier_fare_drop_is_not_pushed_as_an_avelo_sale(monkeypatch):
     f9_run(100.0)
     run2 = f9_run(60.0)
     events = signals.run_detection(run2, conn)
-    sent = []
-    monkeypatch.setattr(config, "NTFY_TOPIC", "probe-topic")
-    monkeypatch.setattr(alerts, "notify_ntfy", lambda title, body, *a, **k: sent.append((title, body)) or True)
-    monkeypatch.setattr(alerts, "evaluate_rules", lambda *a, **k: [])
-    alerts.evaluate_and_deliver(run2, events, conn)
-    assert events == [] and not sent
+    assert "sale_wave" in {e.kind for e in events}
+    assert all(e.airline == "F9" and e.message.startswith("Frontier PHL→MCO") for e in events)
+    assert db.get_floor("PHL", "MCO", conn) is None and db.get_floor("PHL", "MCO", conn, airline="F9") == 60.0
     conn.close()
 
 

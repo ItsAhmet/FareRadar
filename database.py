@@ -85,11 +85,12 @@ CREATE TABLE IF NOT EXISTS route_day_seen (
 );
 
 CREATE TABLE IF NOT EXISTS route_floor (
+    airline      TEXT NOT NULL DEFAULT 'XP',
     origin       TEXT NOT NULL,
     destination  TEXT NOT NULL,
     floor_price  REAL NOT NULL,
     seen_at      TEXT NOT NULL,
-    PRIMARY KEY (origin, destination)
+    PRIMARY KEY (airline, origin, destination)
 );
 
 CREATE TABLE IF NOT EXISTS events (
@@ -171,6 +172,7 @@ MIGRATIONS: dict[tuple[str, str], str] = {
     ("avelo_flights", "member_price"): "ALTER TABLE avelo_flights ADD COLUMN member_price REAL",
     ("price_history", "airline"): "ALTER TABLE price_history ADD COLUMN airline TEXT NOT NULL DEFAULT 'XP'",
     ("scrape_runs", "airline"): "ALTER TABLE scrape_runs ADD COLUMN airline TEXT NOT NULL DEFAULT 'XP'",
+    ("events", "airline"): "ALTER TABLE events ADD COLUMN airline TEXT",  # NULL: a watch-level event, or one from before the column
 }
 
 UPSERT_SQL = """
@@ -211,6 +213,19 @@ def _resolve(db_path: Path | str | None) -> Path | str:
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
+    # route_floor's key gained the airline. Rebuild once; every existing floor is Avelo's.
+    if "airline" not in {row["name"] for row in conn.execute("PRAGMA table_info(route_floor)")}:
+        conn.executescript("""
+            BEGIN;
+            ALTER TABLE route_floor RENAME TO route_floor_pre_airline;
+            CREATE TABLE route_floor (
+                airline TEXT NOT NULL DEFAULT 'XP', origin TEXT NOT NULL, destination TEXT NOT NULL,
+                floor_price REAL NOT NULL, seen_at TEXT NOT NULL, PRIMARY KEY (airline, origin, destination));
+            INSERT INTO route_floor (airline, origin, destination, floor_price, seen_at)
+                SELECT 'XP', origin, destination, floor_price, seen_at FROM route_floor_pre_airline;
+            DROP TABLE route_floor_pre_airline;
+            COMMIT;
+        """)
     columns: dict[str, set[str]] = {}
     for (table, column), ddl in MIGRATIONS.items():
         if table not in columns:
@@ -747,17 +762,17 @@ def previous_run_for_route(run_id: int, origin: str, destination: str, conn: sql
     return rows[0]["prev"] if rows and rows[0]["prev"] is not None else None
 
 
-def get_floor(origin: str, destination: str, conn: sqlite3.Connection | None = None) -> float | None:
-    rows = _fetch("SELECT floor_price FROM route_floor WHERE origin = ? AND destination = ?",
-                  (origin.upper(), destination.upper()), conn)
+def get_floor(origin: str, destination: str, conn: sqlite3.Connection | None = None, airline: str = "XP") -> float | None:
+    rows = _fetch("SELECT floor_price FROM route_floor WHERE airline = ? AND origin = ? AND destination = ?",
+                  (airline.upper(), origin.upper(), destination.upper()), conn)
     return rows[0]["floor_price"] if rows else None
 
 
 def set_floor(origin: str, destination: str, price: float, conn: sqlite3.Connection | None = None,
-              now: datetime | None = None) -> None:
-    _run("""INSERT INTO route_floor (origin, destination, floor_price, seen_at) VALUES (?, ?, ?, ?)
-            ON CONFLICT (origin, destination) DO UPDATE SET floor_price = excluded.floor_price, seen_at = excluded.seen_at""",
-         (origin.upper(), destination.upper(), float(price), _now(now)), conn)
+              now: datetime | None = None, airline: str = "XP") -> None:
+    _run("""INSERT INTO route_floor (airline, origin, destination, floor_price, seen_at) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT (airline, origin, destination) DO UPDATE SET floor_price = excluded.floor_price, seen_at = excluded.seen_at""",
+         (airline.upper(), origin.upper(), destination.upper(), float(price), _now(now)), conn)
 
 
 def get_flight(flight_id: str, departure_datetime: datetime, conn: sqlite3.Connection | None = None) -> Flight | None:
@@ -799,16 +814,16 @@ def find_trip(key: str, conn: sqlite3.Connection | None = None) -> Flight | None
 
 def add_events(run_id: int | None, events: Iterable, conn: sqlite3.Connection | None = None,
                now: datetime | None = None) -> int:
-    """Store Event-like objects (attributes: kind, origin, destination, day, message, detail, notify)."""
+    """Store Event-like objects (attributes: kind, origin, destination, day, message, detail, notify; optional airline)."""
     rows = [
         (run_id, e.kind, e.origin, e.destination, e.day.isoformat() if e.day else None, e.message,
-         json.dumps(e.detail or {}), 1 if e.notify else 0, _now(now))
+         json.dumps(e.detail or {}), 1 if e.notify else 0, getattr(e, "airline", None), _now(now))
         for e in events
     ]
     if not rows:
         return 0
-    _run("""INSERT INTO events (run_id, kind, origin, destination, day, message, detail, notify, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""", rows, conn, many=True)
+    _run("""INSERT INTO events (run_id, kind, origin, destination, day, message, detail, notify, airline, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", rows, conn, many=True)
     return len(rows)
 
 
@@ -1005,15 +1020,12 @@ def reset_baselines(airline: str, conn: sqlite3.Connection | None = None) -> Non
     """Forget what earlier runs saw of one airline, so a change of price basis raises no false signal.
 
     Signals compare a run with the run before it, and a route floor or a watched package total is a fare seen
-    earlier; all of them were priced under the old membership. Drops the airline's route_day_seen rows and the
-    floors of the routes they covered (route_floor has no airline column, so a route two airlines fly loses its
-    floor too, and the next run sets it again), and the stored total of package watches with a leg on this airline.
+    earlier; all of them were priced under the old membership. Drops the airline's route_day_seen rows and its
+    route floors (another airline's floor on the same route stays), and the stored total of package watches with
+    a leg on this airline.
     """
     code = airline.upper()
-    routes = _fetch("""SELECT DISTINCT s.origin, s.destination FROM route_day_seen s
-                       JOIN scrape_runs r ON r.run_id = s.run_id WHERE r.airline = ?""", (code,), conn)
-    _run("DELETE FROM route_floor WHERE origin = ? AND destination = ?",
-         [(r["origin"], r["destination"]) for r in routes], conn, many=True)
+    _run("DELETE FROM route_floor WHERE airline = ?", (code,), conn)
     _run("DELETE FROM route_day_seen WHERE run_id IN (SELECT run_id FROM scrape_runs WHERE airline = ?)", (code,), conn)
     for watch in list_watches("package", conn):
         legs = [trips.payload_trip(watch["payload"], leg) for leg in ("out", "in")]

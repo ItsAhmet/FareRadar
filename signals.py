@@ -19,17 +19,12 @@ import sqlite3
 from dataclasses import dataclass, field
 from datetime import date
 
+import airlines as airline_registry
 import config
 import database
 from config import airport_name
 
 log = logging.getLogger(__name__)
-
-# Airlines whose runs produce signals. route_floor and the events feed carry no airline column yet, so a
-# Frontier run would overwrite Avelo's floor on a shared route and push "Avelo sale" alerts for Frontier fares.
-# Phase 3 makes both airline-aware and widens this set.
-SIGNAL_AIRLINES = frozenset({"XP"})
-
 
 @dataclass
 class Event:
@@ -40,14 +35,16 @@ class Event:
     message: str
     detail: dict = field(default_factory=dict)
     notify: bool = True
+    airline: str | None = None
 
     @property
     def route(self) -> str:
         return f"{self.origin}→{self.destination}" if self.origin and self.destination else ""
 
 
-def _label(origin: str, destination: str) -> str:
-    return f"{origin}→{destination} ({airport_name(destination) if config.is_home(origin) else airport_name(origin)})"
+def _label(origin: str, destination: str, airline: str = "XP") -> str:
+    place = airport_name(destination) if config.is_home(origin) else airport_name(origin)
+    return f"{airline_registry.get(airline).name} {origin}→{destination} ({place})"
 
 
 def detect_route(
@@ -57,10 +54,12 @@ def detect_route(
     cur: dict[date, float | None],
     floor: float | None,
     allow_sold_out: bool = True,
+    airline: str = "XP",
 ) -> tuple[list[Event], float | None]:
     """Compare this run's sightings with the previous run's for one route.
 
-    Returns the events raised and the route's new floor price.
+    `floor` is this airline's floor on the route. Returns the events raised (each carries the airline) and
+    the new floor price.
     """
     events: list[Event] = []
     cur_priced = {d: p for d, p in cur.items() if p is not None}
@@ -69,12 +68,12 @@ def detect_route(
 
     prices = list(cur_priced.values())
     new_floor = min(prices + ([floor] if floor is not None else [])) if prices else floor
-    label = _label(origin, destination)
+    label = _label(origin, destination, airline)
 
     if floor is not None and new_floor is not None and new_floor < floor:
         days = sorted(d for d, p in cur_priced.items() if p == new_floor)
         events.append(Event("new_floor", origin, destination, days[0], f"{label}: new lowest fare ${new_floor:.0f} on {days[0]:%a %b %d}",
-                            {"floor": new_floor, "previous_floor": floor, "days": [d.isoformat() for d in days]}))
+                            {"floor": new_floor, "previous_floor": floor, "days": [d.isoformat() for d in days]}, airline=airline))
 
     if prev:
         prev_priced = {d: p for d, p in prev.items() if p is not None}
@@ -85,19 +84,19 @@ def detect_route(
                 avg = sum(1 - cur_priced[d] / prev_priced[d] for d in drops) / len(drops)
                 events.append(Event("sale_wave", origin, destination, drops[0],
                                     f"{label}: sale wave — {len(drops)} of {len(common)} days down {avg:.0%} on average (from ${min(cur_priced[d] for d in drops):.0f})",
-                                    {"days": [d.isoformat() for d in drops], "avg_drop": round(avg, 3)}))
+                                    {"days": [d.isoformat() for d in drops], "avg_drop": round(avg, 3)}, airline=airline))
 
         if allow_sold_out:
             for d in sorted(set(prev_priced) & {d for d, p in cur.items() if p is None}):
                 events.append(Event("sold_out", origin, destination, d,
                                     f"{label}: {d:%a %b %d} no longer bookable (was ${prev_priced[d]:.0f})",
-                                    {"last_price": prev_priced[d]}))
+                                    {"last_price": prev_priced[d]}, airline=airline))
 
         if floor is not None:
             for d in sorted(d for d in common if prev_priced[d] <= floor and cur_priced[d] > floor):
                 events.append(Event("floor_gone", origin, destination, d,
                                     f"{label}: {d:%a %b %d} left the ${floor:.0f} floor, now ${cur_priced[d]:.0f}",
-                                    {"floor": floor, "now": cur_priced[d]}))
+                                    {"floor": floor, "now": cur_priced[d]}, airline=airline))
 
     if new_floor is not None:
         prev_priced = {d: p for d, p in (prev or {}).items() if p is not None}
@@ -105,27 +104,23 @@ def detect_route(
         for d in at_floor:
             events.append(Event("floor_fare", origin, destination, d,
                                 f"{label}: {d:%a %b %d} at the ${new_floor:.0f} floor fare",
-                                {"floor": new_floor}, notify=False))
+                                {"floor": new_floor}, notify=False, airline=airline))
 
     return events, new_floor
 
 
 def run_detection(run_id: int, conn: sqlite3.Connection | None = None, allow_sold_out: bool = True) -> list[Event]:
-    """Detect signals for every route this run saw and store them. Runs of airlines outside SIGNAL_AIRLINES
-    (Frontier until Phase 3) detect nothing: no events, no floor write."""
-    airline = database.run_airline(run_id, conn)
-    if airline not in SIGNAL_AIRLINES:
-        log.info("signals: skipped for run %s (%s fares are stored but raise no signals yet)", run_id, airline)
-        return []
+    """Detect signals for every route this run saw, against the previous clean run and the floor of the same airline."""
+    airline = database.run_airline(run_id, conn) or "XP"
     all_events: list[Event] = []
     for origin, dest in database.routes_in_run(run_id, conn):
         cur = database.seen_in_run(run_id, origin, dest, conn)
         prev_id = database.previous_run_for_route(run_id, origin, dest, conn)
         prev = database.seen_in_run(prev_id, origin, dest, conn) if prev_id is not None else None
-        floor = database.get_floor(origin, dest, conn)
-        events, new_floor = detect_route(origin, dest, prev, cur, floor, allow_sold_out=allow_sold_out)
+        floor = database.get_floor(origin, dest, conn, airline=airline)
+        events, new_floor = detect_route(origin, dest, prev, cur, floor, allow_sold_out=allow_sold_out, airline=airline)
         if new_floor is not None and new_floor != floor:
-            database.set_floor(origin, dest, new_floor, conn)
+            database.set_floor(origin, dest, new_floor, conn, airline=airline)
         all_events.extend(events)
     database.add_events(run_id, all_events, conn)
     if all_events:
