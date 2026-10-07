@@ -30,38 +30,37 @@ full                calendar first, then detail for every scheduled day
 Stealth
 -------
 One user-agent/viewport per run (a fingerprint that changes mid-session is
-itself a tell), cookies and localStorage persisted between runs in
-`data/browser_state.json`, `navigator.webdriver` masked, trackers blocked,
+itself a tell), cookies persisted between runs in
+`data/browser_state_XP.json`, `navigator.webdriver` masked, trackers blocked,
 and randomised human-like pauses and mouse movement between form actions.
+That plumbing is shared by every airline and lives in `browser.py`.
 
 Parsing is split into pure functions that take HTML so it can be unit-tested
 against captured fixtures without a browser.
 """
 from __future__ import annotations
 
-import asyncio
-import dataclasses
-import json
+import asyncio  # noqa: F401 - tests patch scraper.asyncio.sleep
 import logging
 import random
 import re
-from collections.abc import Awaitable, Callable, Iterable
-from dataclasses import dataclass, field
+from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
-from typing import Literal
 
 from bs4 import BeautifulSoup
-from playwright.async_api import Browser, BrowserContext, Page, async_playwright
+from playwright.async_api import async_playwright
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 
 import config
 import database
 import persist
+from browser import (BLOCKED_HOSTS, BaseScraper, BlockedError, DateUnavailable, Mode, ScrapeError,  # noqa: F401
+                     ScrapeReport, answerable_days, local_today)
 from models import Flight
 
 log = logging.getLogger(__name__)
 
-Mode = Literal["calendar", "detail", "full"]
 LOWFARE_PREFIX = "LOWFARE"  # flight_id prefix for calendar rows (no time known)
 DETAIL_PREFIX = "AVELO"  # flight_id prefix for rows parsed from flight cards
 SEL = config.SELECTORS
@@ -69,37 +68,6 @@ SEL = config.SELECTORS
 # cards at all). The date picker still accepts such a day, so this answer only arrives on the results page.
 NO_FLIGHTS_PATTERN = re.compile(r"no\s+flights\s+available", re.I)
 SOLD_OUT_SETTLE_MS = 1_500  # re-check once before believing the message: cards may still be on their way
-
-# Third-party trackers the booking app embeds. Blocking them makes pages load
-# faster and quieter; none of them affect fares.
-_BLOCKED_HOSTS = re.compile(
-    r"(tiktok|paypal|paypalobjects|doubleclick|google-analytics|googletagmanager|googleadservices|"
-    r"criteo|quantummetric|braintree|slgnt|facebook|bing\.com|clarity\.ms|visualstudio\.com)"
-)
-
-
-class ScrapeError(RuntimeError):
-    """A page loaded but did not contain what we expected."""
-
-
-class DateUnavailable(ScrapeError):
-    """Avelo answered that the requested day has no flights: the picker offers no cell for it, or the results page
-    says "no flights available". An answer, not a failure: it is not retried and the day is recorded as no-fare."""
-
-
-@dataclass
-class ScrapeReport:
-    attempted: int = 0
-    succeeded: int = 0
-    failed: int = 0
-    flights_written: int = 0
-    skipped_routes: list[str] = field(default_factory=list)
-    failures: list[str] = field(default_factory=list)
-
-    def fail(self, message: str) -> None:
-        self.failed += 1
-        self.failures.append(message)
-        log.error(message)
 
 
 # --------------------------------------------------------------------------- #
@@ -300,24 +268,6 @@ def plan_targets(
     return targets, skipped
 
 
-def local_today() -> date:
-    """Today on the machine running the scrape (the owner's Mac, America/New_York). Tests replace it."""
-    return date.today()
-
-
-def answerable_days(days: Iterable[date], wanted: Iterable[date], today: date) -> list[date]:
-    """The days a search can positively answer for: requested, and after today.
-
-    Avelo's Low Fare Calendar renders today as a disabled cell with no fare
-    (`td.day.today.disabled`) even while today's later flights are still
-    bookable, and a past day is never offered. Neither is "no fare": treating
-    it as one would delete today's stored fares and push sold-out and
-    watch-unavailable alerts on the morning of travel.
-    """
-    wanted = set(wanted)
-    return sorted(d for d in set(days) if d in wanted and d > today)
-
-
 def unscheduled_days(
     routes: Iterable[tuple[str, str]],
     dates: Iterable[date],
@@ -346,32 +296,8 @@ def unscheduled_days(
 # --------------------------------------------------------------------------- #
 
 
-class AveloScraper:
-    def __init__(
-        self,
-        headless: bool | None = None,
-        mode: Mode = "calendar",
-        delay_range: tuple[float, float] = config.DELAY_RANGE,
-        max_retries: int = config.MAX_RETRIES,
-        timeout_ms: int = config.PAGE_TIMEOUT_MS,
-        screenshots: bool = True,
-        promo_code: str | None = None,
-        run_id: int | None = None,
-    ) -> None:
-        self.headless = config.HEADLESS if headless is None else headless
-        self.mode = mode
-        self.promo_code = (promo_code or "").strip().upper() or None
-        self.promo_applied = False
-        self.run_id = run_id  # scrape_runs row to attach sightings to (None = don't record)
-        # One fingerprint per run; retries reuse it together with saved cookies.
-        self.user_agent = random.choice(config.USER_AGENTS)
-        self.viewport = random.choice(config.VIEWPORTS)
-        self.delay_range = delay_range
-        self.max_retries = max_retries
-        self.timeout_ms = timeout_ms
-        self.screenshots = screenshots
-        self._context: BrowserContext | None = None
-        self._page: Page | None = None
+class AveloScraper(BaseScraper):
+    airline = "XP"
 
     # ---- lifecycle ------------------------------------------------------- #
 
@@ -442,109 +368,6 @@ class AveloScraper:
             finally:
                 await browser.close()
         return report
-
-    async def _new_page(self, browser: Browser) -> Page:
-        """Fresh context with this run's fingerprint, saved cookies, stealth
-        init script; trackers and images blocked."""
-        if self._context is not None:
-            await self._save_state()
-            await self._context.close()
-        width, height = self.viewport
-        state = config.STORAGE_STATE_PATH if config.STORAGE_STATE_PATH.exists() else None
-        self._context = await browser.new_context(
-            user_agent=self.user_agent,
-            viewport={"width": width, "height": height},
-            locale="en-US",
-            timezone_id="America/New_York",
-            storage_state=str(state) if state else None,
-            extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
-        )
-        self._context.set_default_timeout(self.timeout_ms)
-        await self._context.add_init_script(config.STEALTH_INIT_SCRIPT)
-        await self._context.route(
-            "**/*",
-            lambda route: route.abort()
-            if route.request.resource_type in ("image", "font", "media") or _BLOCKED_HOSTS.search(route.request.url)
-            else route.continue_(),
-        )
-        self._page = await self._context.new_page()
-        return self._page
-
-    async def _save_state(self) -> None:
-        """Persist cookies/localStorage so the next run looks like a returning visitor."""
-        if self._context is None:
-            return
-        try:
-            config.STORAGE_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-            state = await self._context.storage_state()
-            # Keep cookies only. Avelo's app caches its route list in
-            # localStorage; replaying that would stop it re-fetching the
-            # schedule feed we capture on load.
-            state["origins"] = []
-            config.STORAGE_STATE_PATH.write_text(json.dumps(state))
-        except Exception as exc:  # noqa: BLE001 - never fail a scrape over this
-            log.debug("could not save browser state: %s", exc)
-
-    def _tag(self, flight: Flight) -> Flight:
-        """Record which promo (if any) was active when the fare was observed."""
-        code = self.promo_code if self.promo_applied else None
-        return dataclasses.replace(flight, promo_code=code) if code != flight.promo_code else flight
-
-    async def _human_pause(self) -> None:
-        lo, hi = config.HUMAN_PAUSE_S
-        await asyncio.sleep(random.uniform(lo, hi))
-
-    async def _wander(self) -> None:
-        """A couple of idle mouse movements, like someone reading the page."""
-        page = self.page
-        width, height = self.viewport
-        try:
-            for _ in range(random.randint(1, 3)):
-                await page.mouse.move(random.randint(40, width - 40), random.randint(80, height - 80), steps=random.randint(8, 20))
-                await asyncio.sleep(random.uniform(0.05, 0.25))
-            if random.random() < 0.3:
-                await page.mouse.wheel(0, random.randint(60, 240))
-        except Exception:  # noqa: BLE001
-            pass
-
-    @property
-    def page(self) -> Page:
-        assert self._page is not None, "scraper not started"
-        return self._page
-
-    async def _polite_delay(self, short: bool = False) -> None:
-        lo, hi = self.delay_range
-        if short:
-            lo, hi = lo / 3, hi / 3
-        await asyncio.sleep(random.uniform(lo, hi))
-
-    async def _retry(self, fn: Callable[..., Awaitable], tag: str, *args):
-        """Run `fn` with retries, exponential backoff and a screenshot per failure."""
-        for attempt in range(self.max_retries + 1):
-            try:
-                return await fn(*args)
-            except DateUnavailable:
-                raise  # a sold-out day is an answer, not a failure: don't retry it
-            except (PlaywrightTimeout, ScrapeError) as exc:
-                await self._snapshot(tag, attempt)
-                if attempt >= self.max_retries:
-                    raise
-                wait = 2 ** attempt * random.uniform(2, 4)
-                log.warning("%s attempt %d failed (%s); retrying in %.0fs", tag, attempt + 1, str(exc).splitlines()[0], wait)
-                await asyncio.sleep(wait)
-                # A fresh page clears any stuck Blazor state.
-                await self._new_page(self.page.context.browser)  # type: ignore[arg-type]
-
-    async def _snapshot(self, tag: str, attempt: int) -> None:
-        if not self.screenshots or self._page is None:
-            return
-        try:
-            config.SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
-            path = config.SCREENSHOT_DIR / f"{tag}-{attempt}-{datetime.now():%Y%m%d%H%M%S}.png"
-            await self._page.screenshot(path=str(path), full_page=True)
-            log.debug("saved %s", path)
-        except Exception:  # noqa: BLE001 - screenshots are best-effort
-            pass
 
     # ---- schedule --------------------------------------------------------- #
 

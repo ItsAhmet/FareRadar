@@ -11,3 +11,14 @@ os.environ["AVELO_HOME_AIRPORTS"] = "ILG,PHL,BWI"
 
 # Make the flat project modules importable when pytest runs from anywhere.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import pytest  # noqa: E402 - after the environment pin and sys.path setup above
+
+
+@pytest.fixture(autouse=True)
+def _no_real_browser_state(tmp_path, monkeypatch):
+    """Scrapers adopt and write cookie files under data/; tests must never touch the owner's."""
+    import config
+
+    monkeypatch.setattr(config, "STORAGE_STATE_PATH", tmp_path / "legacy_browser_state.json")
+    monkeypatch.setattr(config, "storage_state_path", lambda airline: tmp_path / f"browser_state_{airline.strip().upper()}.json")
