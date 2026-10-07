@@ -271,7 +271,8 @@ SELECTORS: dict[str, str] = {
     "lowfare_day": "td.day.selectable",
     "lowfare_month_tab": "div.month",  # id='10-2026'
     # Standard results page (/flight-search/select)
-    "flight_card": "button.flight-block-wrapper-v2",
+    # Oct 2026 layout: one div.main-block per flight with fare bundles; the button is the Sep 2026 card.
+    "flight_card": "div.main-block, button.flight-block-wrapper-v2",
     # Promo code (search form)
     "promo_toggle": "a.link:has-text('promo code')",
     "promo_input": "input#promo",

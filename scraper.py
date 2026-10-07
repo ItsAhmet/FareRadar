@@ -219,7 +219,10 @@ def parse_select_page(
     """Select Flights page → one Flight per card with times and duration."""
     scraped_at = scraped_at or datetime.now()
     soup = BeautifulSoup(html, "html.parser")
-    cards = soup.select(SEL["flight_card"]) or soup.select(".flight-block")
+    # One card per flight. Try each layout in turn rather than the combined wait selector: the Sep 2026 button
+    # also contains a div.main-block, so matching both at once would count every flight twice.
+    cards = (soup.select("button.flight-block-wrapper-v2") or soup.select("div.main-block")
+             or soup.select(".flight-block"))
     flights: list[Flight] = []
     for card in cards:
         times = [_clock(t.get_text(strip=True)) for t in card.select(".scheduled-time")]
@@ -234,9 +237,12 @@ def parse_select_page(
         duration = _duration_minutes(dur_el.get_text(" ", strip=True) if dur_el else None)
         if duration is None and arr_dt is not None:
             duration = int((arr_dt - dep_dt).total_seconds() // 60)
-        fare = _price_fields(card.select_one(".fare-prices") or card)
+        # Bundles layout: the first bundle is "Basic fare only"; the others show "+$61"-style upsells, not fares.
+        fare = _price_fields(card.select_one(".fare-prices") or card.select_one("button.bundle") or card)
         if fare is None:
             continue
+        number_el = card.select_one(".flight-number")
+        number = re.search(r"\d+", number_el.get_text(" ", strip=True)) if number_el else None
         flights.append(
             Flight(
                 origin=origin,
@@ -244,6 +250,7 @@ def parse_select_page(
                 departure_datetime=dep_dt,
                 arrival_datetime=arr_dt,
                 duration_minutes=duration,
+                flight_number=number.group(0) if number else None,
                 flight_id=f"{DETAIL_PREFIX}-{origin.upper()}-{destination.upper()}",
                 timestamp_scraped=scraped_at,
                 **fare,

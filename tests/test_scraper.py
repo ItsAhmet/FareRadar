@@ -7,6 +7,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 import pytest
+from bs4 import BeautifulSoup
 from playwright.async_api import TimeoutError as PlaywrightTimeout
 
 import config
@@ -167,7 +168,7 @@ class _FakeLocator:
         self.page.waits += 1
         for alt in self.alternatives:
             if isinstance(alt, str):
-                if alt == config.SELECTORS["flight_card"] and "flight-block-wrapper-v2" in self.page.html:
+                if BeautifulSoup(self.page.html, "html.parser").select(alt):  # the real selector, on the real markup
                     return
             elif alt.search(self.page.html):
                 return
@@ -694,3 +695,33 @@ def test_run_clears_fares_on_days_and_routes_the_schedule_no_longer_lists(monkey
     assert lal == [date(2026, 10, 20)]  # Oct 11 was requested and is gone; Oct 20 was not requested and stays
     assert db.seen_in_run(s.run_id, "ILG", "TPA") == {date(2026, 10, 9): 79, date(2026, 10, 12): 89}
     assert db.seen_in_run(s.run_id, "ILG", "LAL") == {}
+
+
+# --- Avelo's Oct 2026 Select Flights layout: one div.main-block per flight with fare bundles --------------------
+
+
+def test_select_page_with_bundles_reads_basic_fare_times_and_flight_number():
+    html = (FIXTURES / "select_page_bundles.html").read_text()  # captured live: TPA→ILG Mon Oct 12 2026
+    (f,) = parse_select_page(html, "TPA", "ILG", date(2026, 10, 12))
+    assert f.departure_datetime == datetime(2026, 10, 12, 7, 0) and f.arrival_datetime == datetime(2026, 10, 12, 9, 24)
+    assert f.duration_minutes == 144 and f.time_known
+    assert (f.price, f.base_price, f.is_member_fare) == (110.0, 147.0, True)  # Basic bundle, not the +$61 upsell
+    assert f.flight_number == "533"
+    assert f.flight_id == "AVELO-TPA-ILG"  # unchanged id keeps price history continuous
+
+
+def test_bundle_upsell_prices_are_never_taken_as_the_fare():
+    html = (FIXTURES / "select_page_bundles.html").read_text()
+    stripped = re.sub(r'<div class="price subscription".*?<div class="divider"></div>', "", html, count=1, flags=re.S)
+    (f,) = parse_select_page(stripped, "TPA", "ILG", date(2026, 10, 12))
+    assert (f.price, f.is_member_fare) == (147.0, False)  # public Basic fare, never "+$61"
+
+
+def test_bundles_page_is_not_mistaken_for_sold_out():
+    assert not select_page_is_sold_out((FIXTURES / "select_page_bundles.html").read_text())
+
+
+def test_scrape_day_returns_flights_from_the_bundles_layout():
+    s = _results_scraper((FIXTURES / "select_page_bundles.html").read_text())
+    (f,) = asyncio.run(s.scrape_day("TPA", "ILG", date(2026, 10, 12)))
+    assert f.price == 110.0 and f.flight_number == "533"

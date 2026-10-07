@@ -18,7 +18,7 @@ Desktop: iCloud "Optimize Mac Storage" evicted ~20k `.venv` files (`ls -lO` show
 ```bash
 cd ~/avelo-finder
 source .venv/bin/activate            # venv already built; playwright chromium installed
-pytest -q                            # 183 tests, no network; AppTest boots the dashboard
+pytest -q                            # 188 tests, no network; AppTest boots the dashboard
 streamlit run app.py                 # dashboard (nothing scrapes on load)
 python launch.py [--detach|--stop]   # start if needed + open browser; ~/Desktop/Avelo Finder.command calls it
 python run_scraper.py --destinations TPA,LAL --start 2026-10-01 --end 2026-10-14   # targeted live scrape
@@ -79,9 +79,14 @@ geocoding, routing, pushes); tests set `config.OFFLINE` via monkeypatch.
   One page load per route covers months → `calendar` mode. **Today** renders as
   `td.day.today.disabled` with no fare even while today's flights are bookable, so
   today and past days are never treated as an answer (`scraper.answerable_days`).
-- Plain search → `/flight-search/select`: `button.flight-block-wrapper-v2` cards with
-  `.scheduled-time` ×2, `.flight-block-duration`, `.fare.subscription/.standard .price`.
-  **No flight numbers anywhere** → `flight_number` is always NULL; ids are `LOWFARE-ORG-DST` / `AVELO-ORG-DST`.
+- Plain search → `/flight-search/select`. **Oct 2026 layout** (fixture `select_page_bundles.html`): one
+  `div.main-block` per flight with `.flight-number` ("Flight 533" → `flight_number`), `.flight-block-duration`,
+  `.scheduled-time` ×2, then three `button.bundle` cards; only the first ("Basic fare only") holds fares
+  (`.price.subscription` / `.price.standard`), the others show `+$61`-style upsells. The Sep 2026 layout
+  (`button.flight-block-wrapper-v2`, fixture `select_page.html`) is still parsed. `SELECTORS["flight_card"]`
+  matches both and is only for *waiting*; the parser tries layouts in order (the old button contains a
+  `div.main-block`, so matching both double-counts). Ids stay `LOWFARE-ORG-DST` / `AVELO-ORG-DST` so price
+  history is continuous. When a detail scrape times out on every day, suspect this selector first.
 - Promo: "Have a promo code" (`a.link`) opens a popover that renders a **second**
   `#promo` input; the popover leaves a `.popover-background` overlay that
   swallows clicks → `_close_popovers()` after applying, and submit falls back
