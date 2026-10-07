@@ -22,6 +22,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import config
+import trips
 from config import DB_PATH, HISTORY_RETENTION_DAYS
 from models import Flight
 
@@ -642,6 +643,22 @@ def get_flight(flight_id: str, departure_datetime: datetime, conn: sqlite3.Conne
     return _from_row(rows[0]) if rows else None
 
 
+def find_trip(key: str, conn: sqlite3.Connection | None = None) -> Flight | None:
+    """The flight a trip key refers to right now.
+
+    Timed key → the flight departing at exactly that time. Day-only key → the
+    cheapest timed flight that day if a detail run has seen the day, else the
+    calendar row.
+    """
+    k = trips.parse(key)
+    same_day = [f for f in query_flights([k.origin], [k.destination], k.day, k.day, conn=conn) if f.airline == k.airline]
+    if k.time != trips.ANY_TIME:
+        return next((f for f in same_day if f.time_known and f.departure_datetime.strftime("%H:%M") == k.time), None)
+    timed = [f for f in same_day if f.time_known]
+    pool = timed or same_day
+    return pool[0] if pool else None
+
+
 # --------------------------------------------------------------------------- #
 # Events (signals + alerts feed)
 # --------------------------------------------------------------------------- #
@@ -726,6 +743,10 @@ def update_watch_state(watch_id: int, state: dict, conn: sqlite3.Connection | No
     _run("UPDATE watchlist SET state = ? WHERE watch_id = ?", (json.dumps(state, default=str), watch_id), conn)
 
 
+def update_watch_payload(watch_id: int, payload: dict, conn: sqlite3.Connection | None = None) -> None:
+    _run("UPDATE watchlist SET payload = ? WHERE watch_id = ?", (json.dumps(payload, default=str), watch_id), conn)
+
+
 def remove_watch(watch_id: int, conn: sqlite3.Connection | None = None) -> int:
     return _run("DELETE FROM watchlist WHERE watch_id = ?", (watch_id,), conn)
 
@@ -784,6 +805,10 @@ def list_bookings(conn: sqlite3.Connection | None = None) -> list[dict]:
 
 def update_booking_state(booking_id: int, state: dict, conn: sqlite3.Connection | None = None) -> None:
     _run("UPDATE bookings SET state = ? WHERE booking_id = ?", (json.dumps(state, default=str), booking_id), conn)
+
+
+def update_booking_payload(booking_id: int, payload: dict, conn: sqlite3.Connection | None = None) -> None:
+    _run("UPDATE bookings SET payload = ? WHERE booking_id = ?", (json.dumps(payload, default=str), booking_id), conn)
 
 
 def remove_booking(booking_id: int, conn: sqlite3.Connection | None = None) -> int:

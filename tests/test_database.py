@@ -226,3 +226,27 @@ def test_settings_and_home_costs(conn):
     db.set_home_cost("phl", 40, 20.0, conn)
     assert db.home_costs(conn)["PHL"] == config.HomeCost(40, 20.0)
     assert db.home_costs(conn)["ILG"] == config.DEFAULT_HOME_COSTS["ILG"]
+
+
+def test_find_trip_resolves_day_and_timed_keys(conn):
+    placeholder = Flight(origin="ILG", destination="TPA", departure_datetime=datetime(2026, 10, 10), price=90,
+                         flight_id="LOWFARE-ILG-TPA")
+    db.upsert_flights([placeholder], conn)
+    assert db.find_trip("XP|ILG|TPA|2026-10-10|*", conn).price == 90
+    assert db.find_trip("XP|ILG|TPA|2026-10-10|08:00", conn) is None
+    # a detail run replaces the placeholder with timed flights
+    db.delete_day("ILG", "TPA", date(2026, 10, 10), conn=conn)
+    db.upsert_flights([flight(day=10, hour=8, price=95, number="XP1"), flight(day=10, hour=18, price=85, number="XP2")], conn)
+    assert db.find_trip("XP|ILG|TPA|2026-10-10|*", conn).departure_datetime.hour == 18   # cheapest that day
+    assert db.find_trip("XP|ILG|TPA|2026-10-10|08:00", conn).price == 95
+    assert db.find_trip("F9|ILG|TPA|2026-10-10|*", conn) is None
+    assert db.find_trip("XP|ILG|TPA|2026-10-11|*", conn) is None
+
+
+def test_payload_updates(conn):
+    wid = db.add_watch("package", "w", {"out_trip": "a"}, conn)
+    db.update_watch_payload(wid, {"out_trip": "b"}, conn)
+    assert db.list_watches("package", conn)[0]["payload"] == {"out_trip": "b"}
+    bid = db.add_booking("b", {"out_trip": "a"}, 100, conn=conn)
+    db.update_booking_payload(bid, {"out_trip": "c"}, conn)
+    assert db.list_bookings(conn)[0]["payload"] == {"out_trip": "c"}
