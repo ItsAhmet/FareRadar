@@ -1021,16 +1021,17 @@ def reset_baselines(airline: str, conn: sqlite3.Connection | None = None) -> Non
 
     Signals compare a run with the run before it, and a route floor or a watched package total is a fare seen
     earlier; all of them were priced under the old membership. Drops the airline's route_day_seen rows and its
-    route floors (another airline's floor on the same route stays), and the stored total of package watches with
-    a leg on this airline.
+    route floors (another airline's floor on the same route stays), and the stored totals of package watches with
+    a leg on this airline: both the last total seen and the total last announced (alert_base).
     """
     code = airline.upper()
     _run("DELETE FROM route_floor WHERE airline = ?", (code,), conn)
     _run("DELETE FROM route_day_seen WHERE run_id IN (SELECT run_id FROM scrape_runs WHERE airline = ?)", (code,), conn)
     for watch in list_watches("package", conn):
         legs = [trips.payload_trip(watch["payload"], leg) for leg in ("out", "in")]
-        if "last_total" in watch["state"] and any(k and _trip_airline(k) == code for k in legs):
-            state = {k: v for k, v in watch["state"].items() if k != "last_total"}
+        stale = {"last_total", "alert_base"} & set(watch["state"])
+        if stale and any(k and _trip_airline(k) == code for k in legs):
+            state = {k: v for k, v in watch["state"].items() if k not in stale}
             update_watch_state(watch["watch_id"], state, conn)
 
 

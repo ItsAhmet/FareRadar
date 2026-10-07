@@ -93,18 +93,20 @@ def pending_bookings(conn: sqlite3.Connection | None = None) -> tuple[list[Event
         drop = round(paid - now_total, 2)
         alerted_at = state.get("alerted_total")
         alerting = drop >= config.BOOKED_DROP_ALERT_USD and (alerted_at is None or now_total < alerted_at - 0.5)
+        mine: list[Event] = []
         if alerting:
-            events.append(Event("booked_drop", None, b["payload"].get("destination"), None,
-                                f"Booked {b['label']} is now ${now_total:.0f}, you paid ${paid:.0f} — ${drop:.0f} cheaper; consider rebooking",
-                                {"booking_id": b["booking_id"], "paid": paid, "now": now_total}))
+            mine.append(Event("booked_drop", None, b["payload"].get("destination"), None,
+                              f"Booked {b['label']} is now ${now_total:.0f}, you paid ${paid:.0f} — ${drop:.0f} cheaper; consider rebooking",
+                              {"booking_id": b["booking_id"], "paid": paid, "now": now_total}))
             state["alerted_total"] = now_total
+        events += mine
         state.update({
             "current_total": now_total,
             "delta": round(now_total - paid, 2),  # positive = you beat the market
             "lowest_seen": min(now_total, state.get("lowest_seen", now_total)),
             "checked_at": datetime.now().isoformat(timespec="seconds"),
         })
-        writes.append(StateWrite("booking", b["booking_id"], state, alerting))
+        writes.append(StateWrite("booking", b["booking_id"], state, alerting, tuple(mine)))
     return events, writes
 
 

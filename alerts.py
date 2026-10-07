@@ -45,6 +45,7 @@ class StateWrite:
     row_id: int
     state: dict
     alerting: bool   # True when this state records an alert the owner must actually receive first
+    events: tuple[Event, ...] = ()   # the events this state accounts for; held back together with an alerting write
 
 
 def apply_writes(writes: list[StateWrite], delivered: bool, conn: sqlite3.Connection | None = None) -> int:
@@ -223,6 +224,11 @@ def package_legs(payload: dict, conn: sqlite3.Connection | None = None) -> tuple
     return (outs[0] if outs else None), None
 
 
+def _leg_airlines(out: Flight, back: Flight) -> list[str]:
+    """Airline codes of a package's two legs, each once: a mixed package's alert names both."""
+    return sorted({(leg.airline or "XP").upper() for leg in (out, back)})
+
+
 def pending_packages(conn: sqlite3.Connection | None = None) -> tuple[list[Event], list[StateWrite]]:
     events: list[Event] = []
     writes: list[StateWrite] = []
@@ -232,36 +238,44 @@ def pending_packages(conn: sqlite3.Connection | None = None) -> tuple[list[Event
         out, back = package_legs(key, conn)
         if out is None or back is None:
             alerting = not state.get("unavailable")
+            mine: list[Event] = []
             if alerting:
-                events.append(Event("watch_unavailable", None, key.get("destination"), None,
-                                    f"Watched package {watch['label']} is no longer available",
-                                    {"watch_id": watch["watch_id"]}))
-            writes.append(StateWrite("watch", watch["watch_id"], {**state, "unavailable": True}, alerting))
+                mine.append(Event("watch_unavailable", None, key.get("destination"), None,
+                                  f"Watched package {watch['label']} is no longer available",
+                                  {"watch_id": watch["watch_id"]}))
+            events += mine
+            writes.append(StateWrite("watch", watch["watch_id"], {**state, "unavailable": True}, alerting, tuple(mine)))
             continue
         total = round(out.price + back.price, 2)
         base = state.get("alert_base", state.get("last_total"))   # what the owner was last told (or first saw)
         alerting = False
-        if base is None:
+        mine = []
+        flown = _leg_airlines(out, back)
+        if base is None or "last_total" not in state:
+            # Never priced, or the stored total was dropped because the price basis changed
+            # (database.reset_baselines): start again from today's total without alerting.
             base = total
         else:
             drop = base - total
             if drop >= config.ALERT_MIN_DROP_USD or (base and drop / base >= config.ALERT_MIN_DROP_PCT):
-                events.append(Event("price_drop", out.origin, out.destination, out.departure_date,
-                                    f"Watched: {watch['label']} dropped ${drop:.0f} to ${total:.0f}",
-                                    {"watch_id": watch["watch_id"], "from": base, "to": total}, airline=out.airline))
+                mine.append(Event("price_drop", out.origin, out.destination, out.departure_date,
+                                  f"Watched: {watch['label']} dropped ${drop:.0f} to ${total:.0f}",
+                                  {"watch_id": watch["watch_id"], "from": base, "to": total, "airlines": flown},
+                                  airline=out.airline))
                 base, alerting = total, True
             elif total - base >= config.ALERT_MIN_DROP_USD:
-                events.append(Event("price_rise", out.origin, out.destination, out.departure_date,
-                                    f"Watched: {watch['label']} rose ${total - base:.0f} to ${total:.0f}",
-                                    {"watch_id": watch["watch_id"], "from": base, "to": total}, notify=False,
-                                    airline=out.airline))
+                mine.append(Event("price_rise", out.origin, out.destination, out.departure_date,
+                                  f"Watched: {watch['label']} rose ${total - base:.0f} to ${total:.0f}",
+                                  {"watch_id": watch["watch_id"], "from": base, "to": total, "airlines": flown},
+                                  notify=False, airline=out.airline))
                 base = total                                         # later drops are measured from the new level
+        events += mine
         upgraded = {**key, "out_trip": trips.upgrade(out_k, out), "in_trip": trips.upgrade(in_k, back)}
         if upgraded != key:
             database.update_watch_payload(watch["watch_id"], upgraded, conn)
         writes.append(StateWrite("watch", watch["watch_id"],
                                  {**state, "last_total": total, "alert_base": base, "unavailable": False,
-                                  "checked_at": datetime.now().isoformat(timespec="seconds")}, alerting))
+                                  "checked_at": datetime.now().isoformat(timespec="seconds")}, alerting, tuple(mine)))
     return events, writes
 
 
@@ -289,19 +303,22 @@ def pending_rules(conn: sqlite3.Connection | None = None, today: date | None = N
         # Rules saved before trip keys stored a different key format: adopt the
         # current matches silently instead of announcing them all as new.
         new_keys = [] if legacy_state else [k for k in keys if k not in previous]
+        mine: list[Event] = []
         for k in new_keys[:max_new]:
             it = keys[k]
-            events.append(Event("rule_match", it.outbound.origin, it.outbound.destination, it.outbound.departure_date,
+            mine.append(Event("rule_match", it.outbound.origin, it.outbound.destination, it.outbound.departure_date,
                                 f"Rule '{watch['label']}': {package_label(it)} for ${it.total_price:.0f}",
-                                {"watch_id": watch["watch_id"], "package": package_key(it), "total": it.total_price},
+                                {"watch_id": watch["watch_id"], "package": package_key(it), "total": it.total_price,
+                                 "airlines": _leg_airlines(it.outbound, it.inbound)},
                                 airline=it.outbound.airline))
         if len(new_keys) > max_new:
-            events.append(Event("rule_match", None, None, None,
+            mine.append(Event("rule_match", None, None, None,
                                 f"Rule '{watch['label']}': {len(new_keys) - max_new} more new matches in the app",
                                 {"watch_id": watch["watch_id"], "extra": len(new_keys) - max_new}))
+        events += mine
         writes.append(StateWrite("watch", watch["watch_id"],
                                  {**state, "matched": sorted(keys), "checked_at": datetime.now().isoformat(timespec="seconds"),
-                                  "match_count": len(keys), "key_version": 2}, alerting=bool(new_keys)))
+                                  "match_count": len(keys), "key_version": 2}, alerting=bool(new_keys), events=tuple(mine)))
     return events, writes
 
 
@@ -369,7 +386,8 @@ class Delivery:
 
 def build_message(events: list[Event]) -> tuple[str, str]:
     kinds = {e.kind for e in events}
-    codes = sorted({e.airline for e in events if e.airline})
+    # A package event lists both legs' airlines, so a mixed package is not titled by its outbound leg alone.
+    codes = sorted({c for e in events for c in ((e.detail or {}).get("airlines") or ([e.airline] if e.airline else []))})
     who = " & ".join(sorted(airline_registry.get(c).name for c in codes)) or "Fare"
     if "price_drop" in kinds:
         title = f"{who} fare dropped"
@@ -428,6 +446,8 @@ def deliver(events: list[Event]) -> Delivery:
     result = Delivery(pushed=len(events))
     if not events:
         return result
+    if config.OFFLINE:
+        return result       # pushes are switched off: no channel is in use, so the in-app feed is the delivery
     title, body = build_message(events)
     if config.NTFY_TOPIC:
         result.ntfy_ok = notify_ntfy(title, body)
@@ -461,8 +481,10 @@ def evaluate_and_deliver(run_id: int | None, signal_events: list[Event], conn: s
         writes += state_writes
     pushes = select_pushes(signal_events + watch_events, watched_routes(conn))
     delivery = deliver(pushes)
-    if delivery.delivered:
-        database.add_events(run_id, watch_events, conn)      # the feed shows an alert once, when it was announced
+    # An event whose state write waits for a retry waits with it, so the feed shows it once, when it was
+    # announced. Every other event belongs to a write that is applied now and would never be raised again.
+    held = {id(e) for w in writes if w.alerting and not delivery.delivered for e in w.events}
+    database.add_events(run_id, [e for e in watch_events if id(e) not in held], conn)
     apply_writes(writes, delivery.delivered, conn)
     summary = {
         "watch_events": len(watch_events),

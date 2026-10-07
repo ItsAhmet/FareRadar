@@ -420,3 +420,100 @@ def test_route_signals_are_pushed_only_for_the_watched_airline(conn):
     assert alerts.build_message([f9_sale])[0] == "Frontier sale on a watched route"
     assert alerts.build_message([f9_sale, xp_sale])[0] == "Avelo & Frontier sale on a watched route"
     assert alerts.build_message([Event("booked_drop", None, "TPA", None, "m")])[0] == "A booked trip got cheaper"
+
+
+# ---- review fixes: offline runs, feed-only events, membership changes, mixed-airline titles
+
+
+def _feed(conn, kind=None):
+    return [e for e in db.list_events(limit=500, conn=conn) if kind is None or e["kind"] == kind]
+
+
+def test_offline_with_a_topic_still_records_the_alert(conn, monkeypatch):
+    monkeypatch.setattr(config, "OFFLINE", True)                    # pushes switched off on purpose
+    monkeypatch.setattr(config, "NTFY_TOPIC", "test-topic")
+    monkeypatch.setattr(config, "SMTP_HOST", "")
+    called = []
+    monkeypatch.setattr(alerts, "notify_ntfy", lambda *a, **k: called.append(a) or False)
+    watched(conn)
+    reprice(conn, 80)                                               # 180 → 160
+    summaries = [alerts.evaluate_and_deliver(None, [], conn) for _ in range(3)]
+    assert summaries[0]["ntfy"] is None and summaries[0]["delivered"] is True and not called
+    assert len(_feed(conn, "price_drop")) == 1                      # in the feed once, not on every run
+    state = db.list_watches("package", conn)[0]["state"]
+    assert state["last_total"] == 160 and state["alert_base"] == 160
+    assert summaries[1]["watch_events"] == 0 and summaries[2]["watch_events"] == 0
+
+
+def test_a_failed_push_does_not_drop_another_watch_s_price_rise_from_the_feed(conn, monkeypatch):
+    monkeypatch.setattr(config, "OFFLINE", False)
+    monkeypatch.setattr(config, "NTFY_TOPIC", "test-topic")
+    monkeypatch.setattr(config, "SMTP_HOST", "")
+    outcome = {"ok": False}
+    monkeypatch.setattr(alerts, "notify_ntfy", lambda *a, **k: outcome["ok"])
+    watched(conn)                                                   # Tampa 100 + 80
+    lal_out, lal_back = f("ILG", "LAL", 8, 9, 100), f("LAL", "ILG", 11, 16, 80)
+    db.upsert_flights([lal_out, lal_back], conn)
+    (it,) = build_itineraries([lal_out], [lal_back], GetawayQuery({"LAL"}, [WINDOW], origins=["ILG"]))
+    alerts.watch_package(it, conn)
+    reprice(conn, 130)                                              # Tampa rises $30 (feed only)
+    db.upsert_flights([f("ILG", "LAL", 8, 9, 60)], conn)            # Lakeland drops $40 (pushed)
+    first = alerts.evaluate_and_deliver(None, [], conn)
+    assert first["delivered"] is False
+    assert [e["kind"] for e in _feed(conn)] == ["price_rise"]       # the rise is recorded with its state write
+    outcome["ok"] = True
+    alerts.evaluate_and_deliver(None, [], conn)
+    assert sorted(e["kind"] for e in _feed(conn)) == ["price_drop", "price_rise"]   # the drop once it was announced
+    alerts.evaluate_and_deliver(None, [], conn)
+    assert len(_feed(conn)) == 2
+
+
+def _frontier_pair(out_airline="F9", back_airline="F9"):
+    out = Flight(airline=out_airline, origin="PHL", destination="TPA", departure_datetime=datetime(2026, 10, 8, 8), price=100,
+                 base_price=100, member_price=70, duration_minutes=150, flight_id=f"{out_airline}-PHL-TPA")
+    back = Flight(airline=back_airline, origin="TPA", destination="PHL", departure_datetime=datetime(2026, 10, 11, 15), price=80,
+                  base_price=80, member_price=60, duration_minutes=150, flight_id=f"{back_airline}-TPA-PHL")
+    return out, back
+
+
+def test_membership_change_does_not_fake_a_price_drop(conn, monkeypatch):
+    monkeypatch.setattr(config, "OFFLINE", False)
+    monkeypatch.setattr(config, "NTFY_TOPIC", "test-topic")
+    monkeypatch.setattr(config, "SMTP_HOST", "")
+    sent = []
+    monkeypatch.setattr(alerts, "notify_ntfy", lambda title, body, **k: sent.append(title) or True)
+    out, back = _frontier_pair()
+    db.upsert_flights([out, back], conn)
+    (it,) = build_itineraries([out], [back], GetawayQuery({"TPA"}, [WINDOW], origins=["PHL"]))
+    alerts.watch_package(it, conn)
+    assert alerts.evaluate_and_deliver(None, [], conn)["pushed"] == 0
+    assert db.list_watches("package", conn)[0]["state"]["alert_base"] == 180
+    db.set_membership("F9", True, conn)                             # fares reprice to 70 + 60
+    state = db.list_watches("package", conn)[0]["state"]
+    assert "last_total" not in state and "alert_base" not in state
+    summary = alerts.evaluate_and_deliver(None, [], conn)
+    assert summary["pushed"] == 0 and sent == [] and _feed(conn) == []
+    assert db.list_watches("package", conn)[0]["state"]["alert_base"] == 130    # the new basis is the baseline
+    db.set_membership("F9", False, conn)                            # leaving the program is not a price rise either
+    assert alerts.evaluate_and_deliver(None, [], conn)["watch_events"] == 0
+
+
+def test_a_base_without_a_last_total_is_reseeded(conn):
+    wid = watched(conn)
+    db.update_watch_state(wid, {"alert_base": 180.0}, conn)         # last_total dropped by an older reset_baselines
+    reprice(conn, 60)
+    assert alerts.evaluate_packages(conn) == []
+    assert db.list_watches("package", conn)[0]["state"]["alert_base"] == 140
+
+
+def test_mixed_airline_package_title_names_both_airlines(conn):
+    out, back = _frontier_pair(out_airline="XP")
+    db.upsert_flights([out, back], conn)
+    (it,) = build_itineraries([out], [back], GetawayQuery({"TPA"}, [WINDOW], origins=["PHL"]))
+    alerts.watch_package(it, conn)
+    alerts.evaluate_packages(conn)
+    db.upsert_flights([Flight(airline="F9", origin="TPA", destination="PHL", departure_datetime=datetime(2026, 10, 11, 15),
+                              price=50, base_price=50, duration_minutes=150, flight_id="F9-TPA-PHL")], conn)
+    (drop,) = alerts.evaluate_packages(conn)
+    assert drop.kind == "price_drop" and drop.airline == "XP" and drop.detail["airlines"] == ["F9", "XP"]
+    assert alerts.build_message([drop])[0] == "Avelo & Frontier fare dropped"

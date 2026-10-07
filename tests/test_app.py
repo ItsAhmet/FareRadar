@@ -331,3 +331,28 @@ def test_signal_badge_belongs_to_the_airline_that_raised_it(mock_db, monkeypatch
     assert len(avelo_only) and (avelo_only["Signals"] == "").all(), "a Frontier signal badged an Avelo-only package"
     assert len(frontier_only) and frontier_only["Signals"].str.contains("floor").all()   # Frontier's own badge still shows
     assert not frontier_only["Signals"].str.contains("sold out").any()   # no Frontier fare is left on those days
+
+
+def _save_rule(at, name):
+    next(t for t in at.text_input if t.label == "Rule name").set_value(name).run()
+    next(b for b in at.button if b.label == "Save rule").click().run()
+    assert not at.exception
+    (rule,) = database.list_watches("rule")
+    return rule["payload"]
+
+
+def test_saved_rule_carries_the_partner_window_and_airlines(mock_db):
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    next(c for c in at.checkbox if c.label == "Only when we're both free").check().run()
+    assert not at.exception
+    payload = _save_rule(at, "Both free")
+    assert set(payload["partner"]) == {"start_weekday", "start_time", "end_weekday", "end_time"}
+    assert payload["airlines"] == sorted(config.KNOWN_AIRLINES) and payload["count_carry_on"] is False
+    import alerts
+    assert alerts.rule_query(payload) is not None                   # the stored window parses back into a query
+
+
+def test_saved_rule_without_a_partner_has_none(mock_db):
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    payload = _save_rule(at, "Just me")
+    assert payload["partner"] is None and payload["airlines"] == sorted(config.KNOWN_AIRLINES)
