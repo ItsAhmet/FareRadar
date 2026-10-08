@@ -60,15 +60,22 @@ ALL_CODES = list(config.ALL_DESTINATIONS)  # every airport either airline can re
 
 
 # --------------------------------------------------------------------------- #
-# Data access (cached; keyed on the DB file's mtime so a scrape invalidates)
+# Data access (cached). Streamlit leaves a parameter whose name starts with an underscore out of the
+# cache key, so the loaders that take `_version` are refreshed only by the cache clear after a scrape
+# this page launched. `load_catalog` takes `version` (hashed): any database change invalidates it.
 # --------------------------------------------------------------------------- #
 
 
 def _db_version() -> float:
-    try:
-        return os.path.getmtime(config.DB_PATH)
-    except OSError:
-        return 0.0
+    """Newest modification time of the database: the file itself or its write-ahead log (another
+    process's writes sit in the log until a checkpoint)."""
+    newest = 0.0
+    for path in (str(config.DB_PATH), f"{config.DB_PATH}-wal"):
+        try:
+            newest = max(newest, os.path.getmtime(path))
+        except OSError:
+            pass
+    return newest
 
 
 @st.cache_data(show_spinner=False)
@@ -86,9 +93,12 @@ def load_freshness(homes: tuple[str, ...], destinations: tuple[str, ...], _versi
     return pd.DataFrame(database.route_freshness(list(homes), list(destinations)))
 
 
-@st.cache_data(show_spinner=False)
-def load_catalog(homes: tuple[str, ...], _version: float) -> dict[str, list[tuple[str, str]]]:
-    """Airline → directional routes it lists from these home airports (empty until a scrape fills the catalog)."""
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_catalog(homes: tuple[str, ...], version: float) -> dict[str, list[tuple[str, str]]]:
+    """Airline → directional routes it lists from these home airports (empty until a scrape fills the catalog).
+
+    `version` is part of the cache key (no leading underscore), so a catalog refreshed by the nightly job
+    reaches a dashboard that is already running; the hour's ttl re-applies the catalog's age cutoff."""
     return {code: database.catalog_routes(code, origins=list(homes)) for code in config.KNOWN_AIRLINES}
 
 
@@ -209,14 +219,25 @@ def _offered() -> list[str]:
 
 
 def _init_selection_state() -> None:
-    if "dest_select" not in st.session_state:
-        st.session_state.dest_select = [c for c in _offered() if c in config.DESTINATIONS] or list(_offered())
+    """Keep `dest_select` inside the offered codes and the region / select-all boxes in step with it.
+
+    While nothing is offered (no airline, no home, or a pair that serves nothing) the selection is left
+    alone: pruning then would empty it for good, and the owner passes through that state whenever the
+    only selected airline or home is swapped. `dest_kept` holds the last selection made while something
+    was offered, because Streamlit may drop `dest_select` on a run that does not draw its widget."""
+    state = st.session_state
     offered = set(_offered())
-    st.session_state.dest_select = [c for c in st.session_state.dest_select if c in offered]   # never keep an unoffered code
+    if offered:
+        if "dest_select" not in state:
+            state.dest_select = (list(state.dest_kept) if "dest_kept" in state
+                                 else [c for c in _offered() if c in config.DESTINATIONS] or list(_offered()))
+        state.dest_select = [c for c in state.dest_select if c in offered]   # never keep an unoffered code
+        state.dest_kept = list(state.dest_select)
+    selected = set(state.get("dest_select", [])) & offered
     for region in config.REGIONS:
         codes = set(config.region_codes(region)) & offered
-        st.session_state[f"region_{region}"] = bool(codes) and codes <= set(st.session_state.dest_select)
-    st.session_state.select_all = bool(offered) and set(st.session_state.dest_select) == offered
+        state[f"region_{region}"] = bool(codes) and codes <= selected
+    state.select_all = bool(offered) and selected == offered
 
 
 def _on_select_all() -> None:
@@ -276,18 +297,29 @@ def availability_picker() -> tuple[Availability, Availability | None, bool]:
     return mine, partner, holiday_extend
 
 
+def _on_this_weekend() -> None:
+    """Button callback: every offered destination for the next 5 days, and queue a scrape of them.
+
+    A callback, not `st.rerun()` after the click: a rerun counts as a finished run, so Streamlit would
+    drop the state of every widget not drawn before it and reset those controls to their defaults."""
+    offered = list(_offered())
+    if not offered:
+        return  # nothing to scrape: an empty destination list would mean "every route" to run_scraper
+    today = date.today()
+    st.session_state.dest_select = offered  # the boxes follow in the run that starts now
+    st.session_state.span = (today, today + timedelta(days=5))
+    st.session_state.pending_scrape = {"destinations": offered, "start": today, "end": today + timedelta(days=5)}
+
+
 def sidebar() -> tuple[GetawayQuery | None, list[str], tuple[date, date], str, dict, list[str], list[str]]:
     st.sidebar.title("✈️ Getaway Finder")
 
-    today = date.today()
-    if st.sidebar.button("⚡ This weekend", help="Next 5 days, every destination, scrape now", width="stretch"):
-        st.session_state.dest_select = list(_offered())  # the boxes follow on the rerun
-        st.session_state.span = (today, today + timedelta(days=5))
-        st.session_state.pending_scrape = {"destinations": list(_offered()), "start": today, "end": today + timedelta(days=5)}
-        st.rerun()
-
     homes, airline_codes = trip_source_picker()
     served = views.served_destinations(airline_codes, homes, load_catalog(tuple(homes), _db_version()))
+    st.session_state.dest_offered = [c for c in ALL_CODES if c in served]   # the button's callback reads it
+    st.sidebar.button("⚡ This weekend", help="Next 5 days, every destination offered below, scrape now", width="stretch",
+                      on_click=_on_this_weekend, disabled=not served)
+    today = date.today()
     destinations = destination_picker(served)
     availability, partner, holiday_extend = availability_picker()
 
@@ -447,6 +479,8 @@ def scraper_panel(destinations: list[str], start: date, end: date) -> dict:
 
     running = st.session_state.get("scrape_proc") is not None
     pending = st.session_state.pop("pending_scrape", None) if not running else None
+    if pending and not pending["destinations"]:
+        pending = None  # never launch with an empty destination list: run_scraper reads that as every route
     if pending:
         destinations, start, end = pending["destinations"], pending["start"], pending["end"]
     if pending or st.sidebar.button(

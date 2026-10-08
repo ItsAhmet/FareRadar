@@ -583,9 +583,23 @@ def test_scrape_button_launches_the_selection(mock_db, monkeypatch):
     cmd = launched["cmd"]
     assert cmd[cmd.index("--origins") + 1] == "ILG,PHL" and cmd[cmd.index("--airlines") + 1] == "F9,XP"
     assert cmd[cmd.index("--destinations") + 1] == "TPA,MCO"
+
+
+def test_this_weekend_scrapes_the_selected_homes_and_airlines(mock_db, launched):
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    next(m for m in at.multiselect if m.label == "Home airports").set_value(["ILG", "PHL"]).run()
+    next(m for m in at.multiselect if m.label == "Airlines").set_value(["XP"]).run()
+    offered = _codes(_airports(at))
+    next(b for b in at.button if "This weekend" in b.label).click().run()
+    assert not at.exception, at.exception
+    cmd = launched[0]
+    assert cmd[cmd.index("--origins") + 1] == "ILG,PHL" and cmd[cmd.index("--airlines") + 1] == "XP"
+    assert cmd[cmd.index("--destinations") + 1] == ",".join(offered) and "DEN" not in offered
 ```
 
-- [ ] **Step 2: Run test to verify it fails** — expected: no caption with "Frontier 2"; `--airlines` missing from the command.
+(`launched` is the fixture added to `tests/test_app.py` in Task 2's fix round: it fakes `subprocess.Popen`, points `config.SCRAPE_LOG` at a tmp path and returns the list of commands. `test_scrape_button_launches_the_selection` may use it instead of its own fake.)
+
+- [ ] **Step 2: Run tests to verify they fail** — expected: no caption with "Frontier 2"; `--airlines` missing from both commands; the "This weekend" command carries `--origins ILG,PHL,BWI`.
 
 - [ ] **Step 3: Implement** — `scraper_panel` gains `homes, airline_codes, catalog` parameters. Caption:
 
@@ -597,7 +611,7 @@ def test_scrape_button_launches_the_selection(mock_db, monkeypatch):
                        + (f" · promo {promo}" if promo else ""))
 ```
 
-Disable the button when `not destinations or not homes or not airline_codes or running`. `build_command(..., origins=list(homes), airlines=sorted(airline_codes))`. The pending "This weekend" scrape stores and reuses the homes and airlines selected when it was clicked. Promo help: "Typed into Avelo's search form on every Avelo search. Fares scraped with a code are tagged with it." `sidebar()` passes the three new arguments.
+Disable the button when `not destinations or not homes or not airline_codes or running`. `build_command(..., origins=list(homes), airlines=sorted(airline_codes))`. The pending "This weekend" scrape stores and reuses the homes and airlines selected when it was clicked: `_on_this_weekend` (the button's `on_click` callback since Task 2's fix round — keep it a callback, `st.rerun()` after the click resets the sidebar) adds `"homes": list(st.session_state.home_select), "airlines": list(st.session_state.airline_select)` to `pending_scrape`, and `scraper_panel` uses `pending["homes"]` / `pending["airlines"]` for that launch. The existing guards stay: the callback queues nothing when no destination is offered, and `scraper_panel` drops a pending scrape whose destination list is empty; extend that guard to empty homes or airlines (an empty `--destinations` means every route to `run_scraper`). Promo help: "Typed into Avelo's search form on every Avelo search. Fares scraped with a code are tagged with it." `sidebar()` passes the three new arguments.
 
 - [ ] **Step 4: Run the whole suite** → all pass.
 
@@ -793,16 +807,17 @@ git commit -m "feat: map draws every home airport by airline; fare calendar spli
 
 **Files:**
 - Modify: `CLAUDE.md`, `README.md`, `.env.example`
+- Test: `tests/test_docs.py`
 
 - [ ] **Step 1: Dashboard dry run on a copy of the real database** — make a read-only `.backup` copy under `.superpowers/probe/`, then run an `AppTest` of `app.py` against it from a scratch test file (with `AVELO_DB_PATH` set to the copy, `subprocess.Popen` and `webbrowser.open` monkeypatched): the page renders without exception; packages are found; "Airlines" defaults to both; the comparison tab shows the single-airline message (the real database has only Avelo fares). Paste the assertions and result into the report; delete the copy.
 
 - [ ] **Step 2: Live check (controller runs this with the owner — implementers skip it)** — on a copy of the real database: a two-airline scrape from the dashboard's own command (`run_scraper.py --airlines F9,XP --origins ILG,PHL --destinations TPA,MCO ... --mode full --no-alerts`), then start the dashboard against the copy and look at: the sidebar controls, mixed packages, the Airline vs airline tab, the Discount Den meter, the map with both airlines, the calendar split by airline, Settings (toggle Discount Den and watch prices re-price), and "Open on airline site" for a Frontier leg.
 
-- [ ] **Step 3: Documentation** — `CLAUDE.md`: add the `views.py` layout row ("pure dashboard view logic: served destinations, labels, scrape plan, airline comparison, map arcs, program meter"); update the `app.py` row and the Streamlit conventions with the session-state keys from Global Constraints; replace the "no dashboard controls until Phase 4" limitation with what now exists; note `AVELO_AIRLINES` defaults to `XP,F9` and caps the nightly job; update the test count; state that all four phases of the spec are built and list what remains (Frontier route list page 2; carry-on fees are estimates; challenge detection never seen live). `README.md`: rewrite the intro for two airlines and three home airports, document the new sidebar controls, Settings panel and comparison tab. `.env.example`: `AVELO_AIRLINES=XP,F9`.
+- [ ] **Step 3: Documentation** — `CLAUDE.md`: add the `views.py` layout row ("pure dashboard view logic: served destinations, labels, scrape plan, airline comparison, map arcs, program meter"); update the `app.py` row and the Streamlit conventions with the session-state keys from Global Constraints; replace the "no dashboard controls until Phase 4" limitation with what now exists; note `AVELO_AIRLINES` defaults to `XP,F9` and caps the nightly job; update the test count; state that all four phases of the spec are built and list what remains (Frontier route list page 2; carry-on fees are estimates; challenge detection never seen live). `README.md`: rewrite the intro for two airlines and three home airports, document the new sidebar controls, Settings panel and comparison tab. `.env.example`: `AVELO_AIRLINES=XP,F9`; reword the carry-on comment (the line containing "carry-on bag per flight leg"), which still says "no dashboard control until Phase 4": the fee is counted when the sidebar's "Count a carry-on bag" checkbox is ticked or a saved rule asks for it (`count_carry_on`). `tests/test_docs.py`: `test_env_example_does_not_promise_a_dashboard_carry_on_toggle` pins the stale wording (`"Phase 4" in line`) — change it to assert `"Phase 4" not in line and "Count a carry-on bag" in line`, keep the two `"toggle" not in` checks, and rename the test to `test_env_example_names_the_carry_on_checkbox`.
 
 - [ ] **Step 4: Final full suite and commit**
 
 ```bash
-git add CLAUDE.md README.md .env.example
+git add CLAUDE.md README.md .env.example tests/test_docs.py
 git commit -m "docs: phase 4 — dashboard for several airlines and home airports"
 ```

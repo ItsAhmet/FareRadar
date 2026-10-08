@@ -421,6 +421,7 @@ def test_narrowing_airlines_and_homes_prunes_destinations_without_errors(mock_db
     assert not at.exception, at.exception
     assert any("Pick at least one airline" in w.value for w in at.warning)
     next(m for m in at.multiselect if m.label == "Airlines").set_value(["XP", "F9"]).run()
+    assert "TPA" in _airports(at).value            # an empty airline selection on the way did not wipe the destinations
     next(m for m in at.multiselect if m.label == "Home airports").set_value([]).run()
     assert not at.exception and any("Pick at least one home airport" in w.value for w in at.warning)
     assert any("Pick at least one home airport and one airline" in i.value for i in at.info)   # main page says why it is empty
@@ -437,3 +438,97 @@ def test_saved_rule_carries_the_sidebar_selection(mock_db):
     assert not at.exception, at.exception
     payload = database.list_watches("rule")[0]["payload"]
     assert (payload["origins"], payload["airlines"], payload["count_carry_on"], payload["allow_open_jaw"]) == (["ILG"], ["XP"], True, False)
+
+
+def _pick(at, label, value):
+    next(m for m in at.multiselect if m.label == label).set_value(value).run()
+    assert not at.exception, at.exception
+
+
+def test_passing_through_a_selection_that_serves_nothing_keeps_the_destinations(mock_db):
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    before = (_airports(at).value, at.metric[2].value)
+    _pick(at, "Airlines", [])                       # swapping the only airline goes through "none"
+    _pick(at, "Airlines", ["F9", "XP"])
+    assert (_airports(at).value, at.metric[2].value) == before
+    assert not any("Pick at least one destination" in i.value for i in at.info)
+
+    _pick(at, "Airports", ["TPA"])                  # a narrowed selection survives it too
+    _pick(at, "Airlines", [])
+    _pick(at, "Airlines", ["XP", "F9"])
+    assert _airports(at).value == ["TPA"]
+
+    _pick(at, "Home airports", ["ILG"])
+    _pick(at, "Airlines", ["F9"])                   # Frontier does not fly from ILG: nothing is offered
+    assert any("No destinations for this choice" in c.value for c in at.sidebar.caption)
+    _pick(at, "Airlines", ["XP"])
+    assert _airports(at).value == ["TPA"]
+    _pick(at, "Home airports", [])                  # and through "no home airport"
+    _pick(at, "Home airports", ["ILG"])
+    assert _airports(at).value == ["TPA"]
+
+
+@pytest.fixture
+def launched(tmp_path, monkeypatch):
+    """Commands the page tried to start; no scrape, browser or real log file is touched."""
+    import subprocess
+    commands = []
+
+    def fake_popen(cmd, **_kw):
+        commands.append(cmd)
+        return _FinishedProc(0)
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(config, "SCRAPE_LOG", tmp_path / "scrape.log")
+    return commands
+
+
+def test_this_weekend_keeps_the_sidebar_choices_and_scrapes_the_offered_destinations(mock_db, launched):
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    _pick(at, "Home airports", ["ILG", "PHL"])
+    _pick(at, "Airlines", ["XP"])
+    next(c for c in at.checkbox if c.label == "Count a carry-on bag").check().run()
+    next(c for c in at.checkbox if c.label == "Return to a different home airport").check().run()
+    next(s for s in at.slider if s.label.startswith("Max total getaway cost")).set_value(250).run()
+    offered = _codes(_airports(at))
+    next(b for b in at.button if "This weekend" in b.label).click().run()
+    assert not at.exception, at.exception
+    assert next(m for m in at.multiselect if m.label == "Home airports").value == ["ILG", "PHL"]
+    assert next(m for m in at.multiselect if m.label == "Airlines").value == ["XP"]
+    assert next(c for c in at.checkbox if c.label == "Count a carry-on bag").value is True
+    assert next(c for c in at.checkbox if c.label == "Return to a different home airport").value is True
+    assert next(s for s in at.slider if s.label.startswith("Max total getaway cost")).value == 250
+    assert _airports(at).value == offered and "DEN" not in offered
+    assert len(launched) == 1
+    cmd = launched[0]
+    assert cmd[cmd.index("--destinations") + 1] == ",".join(offered)
+    today = date.today()
+    assert cmd[cmd.index("--start") + 1] == today.isoformat()
+    assert at.session_state["span"][0] == today
+
+
+def test_this_weekend_with_nothing_offered_launches_no_scrape(mock_db, launched):
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    _pick(at, "Home airports", ["ILG"])
+    _pick(at, "Airlines", ["F9"])                   # Frontier does not fly from ILG: nothing is offered
+    weekend = next(b for b in at.button if "This weekend" in b.label)
+    assert weekend.disabled and next(b for b in at.button if "Execute Target Scrape" in b.label).disabled
+    # the button cannot be clicked now; a scrape queued with no destinations must still not start
+    at.session_state["pending_scrape"] = {"destinations": [], "start": date.today(), "end": date.today()}
+    at.run()                                        # an empty --destinations would mean every route to run_scraper
+    assert not at.exception, at.exception
+    assert launched == [] and "pending_scrape" not in at.session_state
+
+
+def test_catalog_refreshed_by_another_process_reaches_the_destination_list(mock_db):
+    import os
+    import time
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    assert "DEN" in _codes(_airports(at))
+    database.upsert_catalog("F9", [("PHL", "MCO"), ("MCO", "PHL")], source="route_page")   # what the nightly job does
+    stamp = time.time() + 5
+    os.utime(mock_db, (stamp, stamp))               # a later write, whatever the clock's resolution
+    at.run()
+    assert not at.exception, at.exception
+    offered = _codes(_airports(at))
+    assert "DEN" not in offered and "MCO" in offered
