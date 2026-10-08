@@ -707,3 +707,11 @@ def test_sightings_from_before_the_basis_column_drop_frontier_baselines_once(tmp
     assert db.get_floor("PHL", "MCO", conn, airline="F9") == 20
     assert conn.execute("SELECT COUNT(*) FROM route_floor").fetchone()[0] == 3
     conn.close()
+
+
+def test_route_calendar_can_split_by_airline(conn):
+    db.upsert_flights([flight(origin="PHL", dest="MCO", day=10, price=100, number="XP1"), f9(price=60.0)], conn)
+    merged = db.route_calendar(date(2026, 10, 1), date(2026, 10, 31), conn=conn)
+    assert [(r["origin"], r["destination"], r["min_price"], r["flights"]) for r in merged] == [("PHL", "MCO", 60.0, 2)]
+    split = db.route_calendar(date(2026, 10, 1), date(2026, 10, 31), conn=conn, by_airline=True)
+    assert {(r["airline"], r["min_price"]) for r in split} == {("XP", 100.0), ("F9", 60.0)}

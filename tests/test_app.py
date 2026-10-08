@@ -159,7 +159,7 @@ def test_dashboard_labels_follow_the_configured_home_airports(mock_db, monkeypat
     assert at.title[0].value == "Flexible Getaways from PHL / ILG / BWI"
     assert at.sidebar.title[0].value == "✈️ Getaway Finder"
     markdown = " ".join(m.value for m in at.markdown)
-    assert "PHL hub" in markdown and "ILG hub" not in markdown
+    assert "home airport" in markdown and " hub" not in markdown      # the map legend names no single hub
 
 
 def test_clearing_the_place_drops_cached_drive_times(mock_db):
@@ -771,3 +771,17 @@ def test_meter_does_not_claim_zero_savings_for_a_former_member(mock_db):
     at.run()
     meter = [p for p in _meter_pills(at) if "Avelo PLUS would save" in p]
     assert not any("$0 on" in p for p in meter), meter
+
+
+def test_map_and_calendar_render_with_two_airlines(mock_db, monkeypatch):
+    monkeypatch.setattr(config, "HOME_CODES", ["ILG", "PHL"])
+    add_frontier_copy()
+    database.upsert_catalog("F9", [("PHL", "TPA"), ("TPA", "PHL")], "route-page")
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    assert not at.exception, at.exception
+    assert any("Frontier" in m.value and "Avelo" in m.value and "home airport" in m.value for m in at.markdown)   # map legend
+    import json
+    specs = [json.loads(chart.proto.spec) for chart in at.get("plotly_chart") if chart.proto.spec]
+    rows = [y for spec in specs for tr in spec.get("data", []) if tr.get("type") == "heatmap" for y in tr["y"]]
+    assert "Avelo ILG→TPA" in rows and "Frontier PHL→TPA" in rows                    # fare calendar: one row per airline and route
+    assert rows == sorted(rows)                                                      # grouped by airline

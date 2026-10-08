@@ -85,7 +85,7 @@ def load_selection_stats(homes: tuple[str, ...], destinations: tuple[str, ...], 
 
 @st.cache_data(show_spinner=False)
 def load_calendar(start: date, end: date, _version: float) -> pd.DataFrame:
-    return pd.DataFrame(database.route_calendar(start, end))
+    return pd.DataFrame(database.route_calendar(start, end, by_airline=True))
 
 
 @st.cache_data(show_spinner=False)
@@ -609,44 +609,38 @@ def scrape_monitor() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def system_map(selected: list[str]) -> None:
-    hub = config.HOME_AIRPORTS[config.PRIMARY_HOME]
+def _legend_dot(color: tuple[int, int, int], label: str) -> str:
+    return (f'<span style="display:inline-block;width:10px;height:10px;border-radius:50%;'
+            f'background:rgb{tuple(color)};margin-right:4px"></span>{label}')
+
+
+def system_map(selected: list[str], homes: list[str], served: dict[str, list[str]], catalog: dict[str, list[tuple[str, str]]]) -> None:
+    """Every offered destination, every selected home airport, and one arc per airline that flies the pair."""
     chosen = set(selected)
-    points = [
-        {
+    points = []
+    for code, codes in served.items():
+        a = config.ALL_AIRPORTS[code]
+        points.append({
             "code": a.code,
             "city": a.city,
-            "region": a.region,
+            "airline_name": ", ".join(airlines.get(c).name for c in codes),
             "lat": a.lat,
             "lon": a.lon,
             "color": list(config.REGION_COLORS[a.region] if a.code in chosen else config.INACTIVE_COLOR),
             "radius": 26000 if a.code in chosen else 14000,
-        }
-        for a in config.DESTINATIONS.values()
-    ]
-    points.append(
-        {"code": hub.code, "city": hub.city, "region": "Hub", "lat": hub.lat, "lon": hub.lon,
-         "color": list(config.HUB_COLOR), "radius": 34000}
-    )
-    arcs = [
-        {
-            "code": a.code,
-            "city": a.city,
-            "region": a.region,
-            "source": [hub.lon, hub.lat],
-            "target": [a.lon, a.lat],
-            "color": list(config.REGION_COLORS[a.region]),
-        }
-        for a in config.DESTINATIONS.values()
-        if a.code in chosen
-    ]
+        })
+    for home in homes:
+        h = config.ALL_AIRPORTS[home]
+        points.append({"code": h.code, "city": h.city, "airline_name": "home airport", "lat": h.lat, "lon": h.lon,
+                       "color": list(config.HUB_COLOR), "radius": 34000})
+    arcs = views.map_arcs(homes, served, selected, catalog)
     layers = [
         pdk.Layer(
             "ArcLayer",
             data=arcs,
             get_source_position="source",
             get_target_position="target",
-            get_source_color=list(config.HUB_COLOR),
+            get_source_color="color",
             get_target_color="color",
             get_width=3,
             pickable=True,
@@ -674,19 +668,17 @@ def system_map(selected: list[str]) -> None:
             get_alignment_baseline="'bottom'",
         ),
     ]
-    view = pdk.ViewState(latitude=30.5, longitude=-77.0, zoom=3.9, pitch=0)
+    west = any(config.ALL_AIRPORTS[c].lon < -95 for c in chosen if c in served)   # a western city needs the wider frame
+    view = pdk.ViewState(latitude=30.5, longitude=-88 if west else -77.0, zoom=3.2 if west else 3.9, pitch=0)
     st.pydeck_chart(
-        pdk.Deck(layers=layers, initial_view_state=view, tooltip={"text": "{code} · {city}\n{region}"}),
+        pdk.Deck(layers=layers, initial_view_state=view, tooltip={"text": "{code} · {city}\n{airline_name}"}),
         width="stretch",
         height=380,
     )
-    legend = " &nbsp; ".join(
-        f'<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:rgb{config.REGION_COLORS[r]};margin-right:4px"></span>{r}'
-        for r in config.REGIONS
-    )
-    legend += f' &nbsp; <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:rgb{config.HUB_COLOR};margin-right:4px"></span>{config.PRIMARY_HOME} hub'
-    legend += f' &nbsp; <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:rgb{config.INACTIVE_COLOR};margin-right:4px"></span>not selected'
-    st.markdown(f'<div style="font-size:0.85rem">{legend}</div>', unsafe_allow_html=True)
+    flying = {c for codes in served.values() for c in codes}
+    dots = [_legend_dot(airlines.get(c).color, airlines.get(c).name) for c in sorted(flying, reverse=True)]   # Avelo, Frontier
+    dots += [_legend_dot(config.HUB_COLOR, "home airport"), _legend_dot(config.INACTIVE_COLOR, "not selected")]
+    st.markdown(f'<div style="font-size:0.85rem">{" &nbsp; ".join(dots)}</div>', unsafe_allow_html=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -1057,7 +1049,7 @@ def results_table(ranked: list[Itinerary], version: float = 0.0) -> None:
 
 
 def calendar_heatmap(cal: pd.DataFrame, homes: list[str], destinations: list[str], span: tuple[date, date]) -> None:
-    """Route × day grid of the lowest fare. Empty cell = no flight that day."""
+    """Airline and route × day grid of the lowest fare. Empty cell = no flight that day."""
     if cal.empty:
         st.info("No fares in this span to draw a calendar for.")
         return
@@ -1067,8 +1059,9 @@ def calendar_heatmap(cal: pd.DataFrame, homes: list[str], destinations: list[str
     if sub.empty:
         st.info("No fares for the selected destinations in this span.")
         return
-    sub = sub.assign(route=sub.origin + "→" + sub.destination, day=pd.to_datetime(sub.day))
-    routes = list(dict.fromkeys(sorted(out.origin + "→" + out.destination) + sorted(back.origin + "→" + back.destination)))
+    name = sub.airline.map(lambda c: airlines.get(c).name)
+    sub = sub.assign(route=name + " " + sub.origin + "→" + sub.destination, day=pd.to_datetime(sub.day))
+    routes = sorted(sub.route.unique())   # airline name leads the label, so this groups the rows by airline
     days = pd.date_range(span[0], span[1])
     grid = sub.pivot_table(index="route", columns="day", values="min_price", aggfunc="min").reindex(index=routes, columns=days)
     counts = sub.pivot_table(index="route", columns="day", values="flights", aggfunc="sum").reindex(index=routes, columns=days)
@@ -1148,7 +1141,8 @@ def main() -> None:
 
     unread = database.unread_event_count()
     st.title("Flexible Getaways from " + (" / ".join(homes) or "—") + (f"  🔔 {unread}" if unread else ""))
-    system_map(destinations)
+    catalog = load_catalog(tuple(homes), version)   # cached: the sidebar read the same catalog
+    system_map(destinations, homes, views.served_destinations(airline_codes, homes, catalog), catalog)
 
     if not (homes and airline_codes):
         member_badge([])

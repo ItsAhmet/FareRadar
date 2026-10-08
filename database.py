@@ -523,9 +523,11 @@ def route_calendar(
     end_date: date,
     conn: sqlite3.Connection | None = None,
     airlines: Iterable[str] | None = None,
+    by_airline: bool = False,
 ) -> list[dict]:
     """Lowest price per (origin, destination, day). Feeds the calendar view.
-    `airlines` restricts to those carriers (None = all)."""
+    `airlines` restricts to those carriers (None = all). `by_airline` keeps each carrier's
+    fares apart: one row per (airline, origin, destination, day), with `airline` in it."""
     params: list = [start_date.isoformat(), (end_date + timedelta(days=1)).isoformat()]
     airline_sql = ""
     if airlines is not None:
@@ -534,12 +536,13 @@ def route_calendar(
             return []
         airline_sql = f" AND airline IN ({_placeholders(codes)})"
         params.extend(codes)
+    split = "airline, " if by_airline else ""
     sql = f"""
-        SELECT origin, destination, substr(departure_datetime, 1, 10) AS day,
+        SELECT {split}origin, destination, substr(departure_datetime, 1, 10) AS day,
                MIN(price) AS min_price, COUNT(*) AS flights
         FROM avelo_flights
         WHERE departure_datetime >= ? AND departure_datetime < ?{airline_sql}
-        GROUP BY origin, destination, day
+        GROUP BY {split}origin, destination, day
         ORDER BY day
     """
     return [dict(r) for r in _fetch(sql, params, conn)]
