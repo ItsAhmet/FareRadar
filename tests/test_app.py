@@ -547,3 +547,43 @@ def test_settings_panel_changes_membership_and_home_costs(mock_db):
     assert database.home_costs()["PHL"] == config.HomeCost(35.0, 22.0)
     assert database.home_costs()["ILG"].drive_min is None                 # 0 minutes means "not set"
     assert database.list_events(notify_only=True) == []                   # no alert from the membership change
+
+
+def _heatmap_cells(at):
+    import json
+    cells = []
+    for chart in at.get("plotly_chart"):
+        spec = json.loads(chart.proto.spec) if chart.proto.spec else {}
+        cells += [tr.get("z") for tr in spec.get("data", []) if tr.get("type") == "heatmap"]
+    return cells
+
+
+def test_saving_a_membership_change_reprices_everything_the_page_shows(mock_db):
+    from datetime import datetime
+    import trips
+    from models import Flight
+    with database.connection() as c:
+        row = c.execute("SELECT airline, origin, destination, departure_datetime FROM avelo_flights "
+                        "WHERE airline = 'XP' AND member_price < base_price LIMIT 1").fetchone()
+    assert row is not None
+    leg = trips.trip_key(Flight(airline=row["airline"], origin=row["origin"], destination=row["destination"],
+                                departure_datetime=datetime.fromisoformat(row["departure_datetime"]), price=1))
+    watch = database.add_watch("package", "mock package", {"out_trip": leg, "in_trip": leg})
+    database.update_watch_state(watch, {"last_total": 150.0, "alert_base": 150.0})
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    assert not at.exception, at.exception
+    before = _heatmap_cells(at)
+    coverage = lambda: next(c.value for c in at.caption if "member fares" in c.value)
+    assert before and "are Avelo PLUS member fares" in coverage() and "· 0 are" not in coverage()
+    next(c for c in at.checkbox if c.key == "member_XP").set_value(False).run()
+    next(b for b in at.button if b.key == "save_settings").click().run()
+    assert not at.exception, at.exception
+    with database.connection() as c:
+        xp = [dict(r) for r in c.execute("SELECT price, base_price, is_member_fare FROM avelo_flights WHERE airline = 'XP'")]
+    assert xp and all(r["price"] == r["base_price"] and not r["is_member_fare"] for r in xp)   # stored fares repriced
+    at.run()
+    assert _heatmap_cells(at) != before                                   # the price calendar shows the new prices
+    assert "· 0 are Avelo PLUS member fares" in coverage()                # and so does the coverage line
+    state = database.list_watches("package")[0]["state"]
+    assert "last_total" not in state and "alert_base" not in state        # price alerts restart from the new basis
+    assert database.list_events(notify_only=True) == []

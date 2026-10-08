@@ -424,6 +424,7 @@ def settings_panel() -> None:
             for code in config.HOME_CODES:
                 drive = int(st.session_state[f"drive_{code}"])
                 database.set_home_cost(code, float(drive) if drive > 0 else None, float(st.session_state[f"parking_{code}"]))
+            st.cache_data.clear()      # the calendar, history and coverage readers hold pre-save prices
             _search_cache().clear()
             st.success("Settings saved.")
 
