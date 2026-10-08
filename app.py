@@ -308,14 +308,19 @@ def _on_this_weekend() -> None:
     today = date.today()
     st.session_state.dest_select = offered  # the boxes follow in the run that starts now
     st.session_state.span = (today, today + timedelta(days=5))
-    st.session_state.pending_scrape = {"destinations": offered, "start": today, "end": today + timedelta(days=5)}
+    st.session_state.pending_scrape = {
+        "destinations": offered, "start": today, "end": today + timedelta(days=5),
+        "homes": list(st.session_state.get("home_select", [])),
+        "airlines": sorted(st.session_state.get("airline_select", [])),
+    }
 
 
 def sidebar() -> tuple[GetawayQuery | None, list[str], tuple[date, date], str, dict, list[str], list[str]]:
     st.sidebar.title("✈️ Getaway Finder")
 
     homes, airline_codes = trip_source_picker()
-    served = views.served_destinations(airline_codes, homes, load_catalog(tuple(homes), _db_version()))
+    catalog = load_catalog(tuple(homes), _db_version())
+    served = views.served_destinations(airline_codes, homes, catalog)
     st.session_state.dest_offered = [c for c in ALL_CODES if c in served]   # the button's callback reads it
     st.sidebar.button("⚡ This weekend", help="Next 5 days, every destination offered below, scrape now", width="stretch",
                       on_click=_on_this_weekend, disabled=not served)
@@ -392,7 +397,7 @@ def sidebar() -> tuple[GetawayQuery | None, list[str], tuple[date, date], str, d
         )
 
     st.sidebar.divider()
-    scrape_opts = scraper_panel(destinations, span_start, span_end)
+    scrape_opts = scraper_panel(destinations, span_start, span_end, homes, airline_codes, catalog)
     st.sidebar.divider()
     rule_panel()
     settings_panel()
@@ -479,9 +484,10 @@ def scheduler_panel() -> None:
             ))
 
 
-def scraper_panel(destinations: list[str], start: date, end: date) -> dict:
+def scraper_panel(destinations: list[str], start: date, end: date, homes: list[str], airline_codes: list[str],
+                  catalog: dict[str, list[tuple[str, str]]]) -> dict:
     """Filter-before-scrape: the scraper only ever runs from this button, with
-    exactly the destinations, date span and promo code chosen above. It runs as
+    exactly the airlines, home airports, destinations, date span and promo code chosen above. It runs as
     a background process so the dashboard stays responsive; `scrape_monitor`
     tails its log."""
     st.sidebar.subheader("Scraper")
@@ -496,25 +502,30 @@ def scraper_panel(destinations: list[str], start: date, end: date) -> dict:
         "Active Promo Code (Optional)",
         max_chars=20,
         placeholder="e.g. SAVE20",
-        help="Typed into Avelo's search form on every search. Fares scraped with a code are tagged with it.",
+        help="Typed into Avelo's search form on every Avelo search. Fares scraped with a code are tagged with it.",
     ).strip().upper()
     st.session_state.promo_code_value = promo
     headful = st.sidebar.checkbox("Show browser window", value=False)
-    routes = len(destinations) * 2 * len(config.HOME_CODES)
+    plan = views.scrape_plan(airline_codes, homes, destinations, catalog)
     days = (end - start).days + 1
-    st.sidebar.caption(
-        f"Target: {routes} routes × {days} days · {'/'.join(config.HOME_CODES)} ⇄ {', '.join(destinations) or '—'}"
-        + (f" · promo {promo}" if promo else "")
+    per_airline = " · ".join(
+        f"{airlines.get(code).name} {n}" if code != "F9" or catalog.get(code)
+        else f"{airlines.get(code).name} up to {n} (route list not fetched yet)"
+        for code, n in sorted(plan.items(), reverse=True)
     )
+    st.sidebar.caption(f"Target: {sum(plan.values())} routes × {days} days · {per_airline or 'nothing selected'}"
+                       + (f" · promo {promo}" if promo else ""))
 
     running = st.session_state.get("scrape_proc") is not None
     pending = st.session_state.pop("pending_scrape", None) if not running else None
-    if pending and not pending["destinations"]:
-        pending = None  # never launch with an empty destination list: run_scraper reads that as every route
+    if pending and not (pending["destinations"] and pending.get("homes") and pending.get("airlines")):
+        pending = None  # never launch with an empty list: run_scraper reads empty destinations as every route
     if pending:
         destinations, start, end = pending["destinations"], pending["start"], pending["end"]
+        homes, airline_codes = pending["homes"], pending["airlines"]   # what was selected when the button was clicked
     if pending or st.sidebar.button(
-        "🎯 Execute Target Scrape", type="primary", width="stretch", disabled=not destinations or running
+        "🎯 Execute Target Scrape", type="primary", width="stretch",
+        disabled=not destinations or not homes or not airline_codes or running,
     ):
         busy = runlock.running_pid()
         if busy:  # the nightly job or a CLI scrape: don't spawn one that would exit 3
@@ -525,7 +536,7 @@ def scraper_panel(destinations: list[str], start: date, end: date) -> dict:
         database.maintenance()
         cmd = build_command(
             destinations, start, end, mode=depth, mock=source.startswith("Mock"), headful=headful, promo=promo or None,
-            origins=list(config.HOME_CODES),
+            origins=list(homes), airlines=sorted(airline_codes),
         )
         config.SCRAPE_LOG.parent.mkdir(parents=True, exist_ok=True)
         log_file = open(config.SCRAPE_LOG, "w")

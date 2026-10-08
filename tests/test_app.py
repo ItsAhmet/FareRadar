@@ -587,3 +587,38 @@ def test_saving_a_membership_change_reprices_everything_the_page_shows(mock_db):
     state = database.list_watches("package")[0]["state"]
     assert "last_total" not in state and "alert_base" not in state        # price alerts restart from the new basis
     assert database.list_events(notify_only=True) == []
+
+
+def test_scrape_button_launches_the_selection(mock_db, launched):
+    database.upsert_catalog("F9", [("PHL", "MCO"), ("MCO", "PHL")], "route-page")
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    next(m for m in at.multiselect if m.label == "Home airports").set_value(["ILG", "PHL"]).run()
+    next(m for m in at.multiselect if m.label == "Airports").set_value(["TPA", "MCO"]).run()
+    assert any("Avelo 8" in c.value and "Frontier 2" in c.value for c in at.sidebar.caption)
+    next(b for b in at.button if "Execute Target Scrape" in b.label).click().run()
+    assert not at.exception, at.exception
+    cmd = launched[0]
+    assert cmd[cmd.index("--origins") + 1] == "ILG,PHL" and cmd[cmd.index("--airlines") + 1] == "F9,XP"
+    assert cmd[cmd.index("--destinations") + 1] == "TPA,MCO"
+
+
+def test_scrape_caption_calls_an_unfetched_frontier_route_list_an_estimate(mock_db, launched):
+    at = AppTest.from_file(str(APP), default_timeout=90).run()     # no catalog rows: Frontier's list is not fetched
+    captions = [c.value for c in at.sidebar.caption if c.value.startswith("Target:")]
+    assert len(captions) == 1
+    assert "Frontier up to" in captions[0] and "route list not fetched yet" in captions[0]
+    assert "Avelo up to" not in captions[0]
+    next(b for b in at.button if "Execute Target Scrape" in b.label).click().run()
+    assert not at.exception, at.exception
+    cmd = launched[0]
+    assert cmd[cmd.index("--airlines") + 1] == "F9,XP"
+
+
+def test_this_weekend_scrape_uses_the_homes_and_airlines_selected_when_clicked(mock_db, launched):
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    _pick(at, "Home airports", ["ILG", "PHL"])
+    _pick(at, "Airlines", ["XP"])
+    next(b for b in at.button if "This weekend" in b.label).click().run()
+    assert not at.exception, at.exception
+    cmd = launched[0]
+    assert cmd[cmd.index("--origins") + 1] == "ILG,PHL" and cmd[cmd.index("--airlines") + 1] == "XP"
