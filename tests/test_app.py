@@ -378,8 +378,8 @@ def test_saved_rule_without_a_partner_has_none(mock_db):
     assert payload["partner"] is None and payload["airlines"] == sorted(config.KNOWN_AIRLINES)
 
 
-def test_dashboard_shows_frontier_packages_with_their_airline(mock_db, monkeypatch):
-    monkeypatch.setattr(config, "HOME_CODES", ["ILG", "PHL"])
+def add_frontier_copy() -> None:
+    """Frontier fares on the same dates as the Avelo mock schedule, from PHL, $40 cheaper."""
     with database.connection() as conn:
         conn.execute("""
             INSERT INTO avelo_flights (flight_id, origin, destination, departure_datetime, arrival_datetime, price, currency,
@@ -389,6 +389,11 @@ def test_dashboard_shows_frontier_packages_with_their_airline(mock_db, monkeypat
                    price - 40, currency, duration_minutes, flight_number, price - 40, price - 41, 0, promo_code, 'F9', timestamp_scraped
             FROM avelo_flights WHERE (origin = 'ILG' OR destination = 'ILG') AND arrival_datetime IS NOT NULL
         """)
+
+
+def test_dashboard_shows_frontier_packages_with_their_airline(mock_db, monkeypatch):
+    monkeypatch.setattr(config, "HOME_CODES", ["ILG", "PHL"])
+    add_frontier_copy()
     at = AppTest.from_file(str(APP), default_timeout=90).run()
     assert not at.exception, at.exception
     tables = [df.value for df in at.dataframe if "Airlines" in df.value.columns]
@@ -683,3 +688,20 @@ def test_this_weekend_under_mock_data_launches_the_mock_selection(mock_db, launc
     assert not at.exception, at.exception
     cmd = launched[0]
     assert "--mock" in cmd and cmd[cmd.index("--airlines") + 1] == "XP" and cmd[cmd.index("--origins") + 1] == "ILG"
+
+
+def test_airline_vs_airline_tab_compares_the_same_weekend(mock_db, monkeypatch):
+    monkeypatch.setattr(config, "HOME_CODES", ["ILG", "PHL"])
+    add_frontier_copy()
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    assert not at.exception, at.exception
+    tables = [df.value for df in at.dataframe if {"Avelo", "Frontier", "Cheaper"} <= set(df.value.columns)]
+    assert tables and len(tables[0]) > 0
+    both = tables[0].dropna(subset=["Avelo", "Frontier"])
+    assert len(both) > 0 and (both["Saves"] >= 0).all()
+    assert set(both["Cheaper"]) <= {"Avelo", "Frontier"}
+
+
+def test_airline_vs_airline_tab_explains_single_airline_data(mock_db):
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    assert any("Only one airline has packages" in i.value for i in at.info)

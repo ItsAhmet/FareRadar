@@ -901,6 +901,22 @@ def alerts_tab() -> None:
             st.rerun()
 
 
+def comparison_tab(itins: list[Itinerary]) -> None:
+    """Same free window, same destination: each airline's best package, from whichever home airport is cheapest."""
+    df = views.airline_comparison(itins)
+    if df.empty:
+        st.info("Nothing to compare yet.")
+        return
+    names = [airlines.get(code).name for code in sorted(config.KNOWN_AIRLINES, reverse=True)]
+    if not all(df[n].notna().any() for n in names):
+        st.info("Only one airline has packages for this selection. Scrape the other airline for the same dates to compare.")
+    st.caption("Cost per package: both fares, plus parking and the drive to the home airport when set in Settings "
+               "(door-to-door when a destination place is entered). Mixed-airline packages are in the main table.")
+    st.dataframe(df, hide_index=True, width="stretch",
+                 column_config={**{n: st.column_config.NumberColumn(format="$%d") for n in names},
+                                "Saves": st.column_config.NumberColumn(format="$%d", help="How much the cheaper airline saves.")})
+
+
 def season_tab(itins: list[Itinerary], windows: int) -> None:
     st.caption(f"One getaway per free window ({windows} windows in your span), never the same destination twice unless you allow it.")
     c1, c2, c3, c4 = st.columns([2, 1, 1, 2])
@@ -1157,8 +1173,9 @@ def main() -> None:
     if itins:
         wildcard_panel(itins)
 
-    tab_table, tab_inspect, tab_season, tab_alerts, tab_calendar, tab_timeline = st.tabs(
-        ["Getaway packages", "Trend & weather", "Season plan", "Watchlist & alerts", "Fare calendar", "Trip timeline"]
+    tab_table, tab_compare, tab_inspect, tab_season, tab_alerts, tab_calendar, tab_timeline = st.tabs(
+        ["Getaway packages", "Airline vs airline", "Trend & weather", "Season plan", "Watchlist & alerts",
+         "Fare calendar", "Trip timeline"]
     )
     with tab_season:
         if itins:
@@ -1172,6 +1189,8 @@ def main() -> None:
             results_table(ranked, version)
         else:
             st.info("No valid packages. Widen the span, lower the minimum nights, raise the budget, or scrape more routes.")
+    with tab_compare:
+        comparison_tab(itins)
     with tab_inspect:
         if ranked:
             package_inspector(ranked, version)
