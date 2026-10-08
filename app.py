@@ -1028,7 +1028,7 @@ def results_table(ranked: list[Itinerary], version: float = 0.0) -> None:
                 format="$%d",
                 help="Parking at the home airport you fly from (per night, at least one day) plus your drive from "
                      "home to that airport and back at your $/hour. Default parking: ILG $0, PHL $17, BWI $14 a day; "
-                     "the home drive counts only once set. There is no dashboard control for these yet."),
+                     "the home drive counts only once set. Change them in Settings (sidebar)."),
             "Member Fare": st.column_config.CheckboxColumn(disabled=True),
             "Times Verified": st.column_config.CheckboxColumn(disabled=True),
         },

@@ -19,7 +19,7 @@ Desktop: iCloud "Optimize Mac Storage" evicted ~20k `.venv` files (`ls -lO` show
 ```bash
 cd ~/avelo-finder
 source .venv/bin/activate            # venv already built; playwright chromium installed
-pytest -q                            # tests, no network; AppTest boots the dashboard (449 passed)
+pytest -q                            # tests, no network; AppTest boots the dashboard (451 passed)
 streamlit run app.py                 # dashboard (nothing scrapes on load)
 python launch.py [--detach|--stop]   # start if needed + open browser; ~/Desktop/Avelo Finder.command calls it
 python run_scraper.py --destinations TPA,LAL --start 2026-10-01 --end 2026-10-14   # targeted live scrape
@@ -189,7 +189,7 @@ directory; keep both files. A scratch `AVELO_DB_PATH` for a test run may have an
   is refreshing first; `--mock` runs Avelo from the primary home only, and the caption says so. "This weekend" scrapes the
   destinations the sidebar offers, with the homes and airlines selected when it was clicked.
 - Settings (memberships, parking, drive minutes) are saved through `database.set_membership` / `set_home_cost`; saving re-prices
-  stored fares (no price-drop alert is raised) and clears Streamlit's cached readers and the search cache. Memberships default to
+  stored fares (no package-watch or route-signal alert is raised; a booked trip or a rule with a price cap can still alert) and clears Streamlit's cached readers and the search cache. Memberships default to
   Avelo PLUS yes, Frontier Discount Den no. The Discount Den meter (`views.program_meter`) appears while the owner is not a member
   and says what the program would save on booked legs and on the best listed package; each program's meter counts only its own
   airline's legs.

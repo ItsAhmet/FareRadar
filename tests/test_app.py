@@ -249,7 +249,7 @@ def test_packages_table_explains_door_to_door_and_home_side_costs(mock_db):
     columns = json.loads(table.proto.columns)
     door, home = columns["Door-to-door"]["help"], columns["Home-side $"]["help"]
     assert "Home-side" in door and "parking" in door
-    assert "Parking" in home and "PHL $17" in home and "no dashboard control" in home
+    assert "Parking" in home and "PHL $17" in home and "Settings" in home and "no dashboard control" not in home
 
 
 def test_latest_run_signals_cover_every_airlines_newest_run(mock_db):

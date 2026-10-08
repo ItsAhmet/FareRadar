@@ -19,8 +19,9 @@ Avelo's 16 nonstop cities from ILG:
 | Tennessee | BNA |
 | Caribbean | SJU |
 
-Frontier's destinations from PHL and BWI are read from its public route pages
-and added to the destination list as they are discovered.
+Frontier's destinations come from the same fixed airport list in `config.py`; which of
+them are offered from PHL and BWI follows Frontier's public route pages once a scrape
+has read them (airports not in the list are ignored).
 
 ```
 avelo-finder/
@@ -53,7 +54,7 @@ source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 playwright install chromium        # one-time browser download (~100 MB)
 cp .env.example .env               # optional: tweak headless mode, DB path, etc.
-pytest -q                          # 449 tests, no network needed
+pytest -q                          # 451 tests, no network needed
 ```
 
 The project lives in `~/avelo-finder`, outside iCloud-synced folders. To start
@@ -290,7 +291,7 @@ streamlit run app.py
 * **⚙️ Settings** (sidebar expander): tick **Avelo PLUS member** and **Discount Den
   member** to say which programs you belong to, and set parking $/day and the drive
   from home (minutes) for each home airport. **Save settings** re-prices every stored
-  fare to what you would pay (no price-drop alert is raised by the change) and
+  fare to what you would pay (no package-watch or route-signal alert is raised by the change; a booked trip or a rule with a price cap can still alert) and
   refreshes the page; parking and drive feed the "home side" cost and door-to-door ranking.
 * **Header badge**: *Avelo Plus Pricing Active (Free Carry-On & Seat
   Selection Applied)*. Total Getaway Cost is what you pay per leg

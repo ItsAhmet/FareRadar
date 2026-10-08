@@ -40,6 +40,7 @@ def test_membership_change_claim_is_scoped():
     for name in ("CLAUDE.md", "README.md"):
         text = _flat(name)
         assert "a membership change raises no alert" not in text
+        assert "no price-drop alert is raised" not in text
         assert "booked trip" in text and "membership change raises no package-watch or route-signal alert" in text
 
 
@@ -55,3 +56,16 @@ def test_docs_describe_the_phase_4_dashboard_not_the_missing_one():
     assert "AVELO_AIRLINES=XP,F9" in _read(".env.example")
     readme = _flat("README.md")
     assert "Airline vs airline" in readme and "Settings" in readme and "Home airports" in readme
+
+
+def test_dashboard_text_does_not_deny_the_settings_panel():
+    app = _read("app.py")
+    assert "Parking $/day" in app and "Drive from home (min)" in app
+    stale = [l.strip() for l in app.splitlines() if "no dashboard control" in l.lower()]
+    assert not stale, stale
+
+
+def test_frontier_destinations_are_not_described_as_discovered_into_the_list():
+    readme = _flat("README.md")
+    assert "added to the destination list as they are discovered" not in readme
+    assert "fixed airport list in `config.py`" in readme
