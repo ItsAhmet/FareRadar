@@ -570,3 +570,17 @@ def test_from_rules_flag_fills_the_request(isolated, monkeypatch):
     assert seen == {"airline": "F9", "origins": "PHL", "destinations": "MCO", "days": 21}
     run_scraper.main(["--from-rules", "--no-alerts", "--days", "7", "--airlines", "F9"])
     assert seen["days"] == 7                                         # an explicit flag wins
+
+
+def test_mock_runs_write_no_route_floor_but_still_demo_a_sale_wave(isolated, monkeypatch):
+    # spec: floors exclude mock rows. The README demo (a mock run, then one with --mock-sale) still shows its wave.
+    monkeypatch.setattr(config, "OFFLINE", True)
+    args = ["--mock", "--destinations", "TPA", "--origins", "ILG", "--days", "20"]
+    assert run_scraper.main(args) == 0
+    with database.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM route_floor").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 0
+    assert run_scraper.main(args + ["--mock-sale", "0.25"]) == 0
+    with database.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM route_floor").fetchone()[0] == 0
+        assert {r[0] for r in conn.execute("SELECT kind FROM events")} == {"sale_wave"}

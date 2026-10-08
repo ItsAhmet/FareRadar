@@ -163,3 +163,17 @@ def test_calendar_save_applies_membership_to_every_row(conn):
     persist.save_calendar(run, "ILG", "TPA", [date(2026, 10, 9)], [f], conn)
     assert conn.execute("SELECT price, is_member_fare FROM avelo_flights").fetchone()[:] == (99.0, 0)
     assert db.seen_in_run(run, "ILG", "TPA", conn) == {date(2026, 10, 9): 99.0}
+
+
+def test_frontier_calendar_sightings_are_marked_as_calendar_prices(conn):
+    # Frontier's calendar price is the lowest Discount Den total of any routing; a day search gives the nonstop's
+    # fare. Avelo's calendar fare is the bookable nonstop fare. Signals compare one basis at a time.
+    run = db.start_run("full", [("ILG", "TPA")], conn=conn, airline="F9")
+    persist.save_day(run, "ILG", "TPA", date(2026, 10, 9), [f9_timed(9, 8, 204.0)], conn, airline="F9")
+    persist.save_calendar(run, "ILG", "TPA", [date(2026, 10, 10)], [f9_cal(10, 139.0)], conn, airline="F9")
+    assert db.seen_in_run(run, "ILG", "TPA", conn, basis=db.BASIS_FARE) == {date(2026, 10, 9): 204.0}
+    assert db.seen_in_run(run, "ILG", "TPA", conn, basis=db.BASIS_CALENDAR) == {date(2026, 10, 10): 139.0}
+    assert db.bases_in_run(run, "ILG", "TPA", conn) == [db.BASIS_FARE, db.BASIS_CALENDAR]
+    xp = db.start_run("calendar", [("ILG", "TPA")], conn=conn)
+    persist.save_calendar(xp, "ILG", "TPA", [date(2026, 10, 9)], [cal(9, 79)], conn)
+    assert db.bases_in_run(xp, "ILG", "TPA", conn) == [db.BASIS_FARE]

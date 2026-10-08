@@ -672,3 +672,33 @@ def test_scraper_helper_without_a_test_database_never_reaches_the_real_one(_no_r
         scraper_with(monkeypatch, "calendar")
     assert [Path(p) for p in _no_real_database] == [Path(config.DB_PATH)]      # whatever AVELO_DB_PATH names
     _no_real_database.clear()
+
+
+def test_alternating_full_and_calendar_runs_push_nothing_while_fares_stand_still(f9db, monkeypatch):
+    # The owner is not in Discount Den: a day search stores the nonstop at the public $20, the calendar shows the
+    # Den's $14 (any routing). The documented path is a hand-run --mode full followed by the nightly calendar job.
+    from datetime import time
+
+    import alerts
+    from optimizer import Availability
+
+    sent = []
+    monkeypatch.setattr(config, "OFFLINE", False)
+    monkeypatch.setattr(config, "NTFY_TOPIC", "test-topic")
+    monkeypatch.setattr(config, "SMTP_HOST", "")
+    monkeypatch.setattr(alerts, "notify_ntfy", lambda title, body, **_k: sent.append((title, body)) or True)
+    db.set_route_nonstop("F9", "PHL", "MCO", True)
+    # budget $1: no package ever matches, so only route signals could be pushed; the rule watches every airline
+    db.add_watch("rule", "Orlando", alerts.rule_payload(["MCO"], Availability(0, time(0, 0), 6, time(23, 59)), 1, 1.0, True, 100.0,
+                                                         origins=["PHL"], airlines=sorted(config.KNOWN_AIRLINES)))
+    calendar = ([cal_flight(d.day, 14.0) for d in sorted(WANTED)], [date(2026, 11, d) for d in range(1, 31)])
+    nonstops = {d: [timed_flight(d.day, price=20.0)] for d in WANTED}
+    for mode in ("full", "calendar", "full", "calendar"):
+        s = scraper_with(monkeypatch, mode, calendar=calendar, days=nonstops)
+        assert run_routes(s).failed == 0
+        events = signals.run_detection(s.run_id)
+        db.finish_run(s.run_id, {}, status="ok")
+        alerts.evaluate_and_deliver(s.run_id, events)
+        assert [e for e in events if e.notify] == [] and sent == [], mode
+        assert db.get_floor("PHL", "MCO", airline="F9") == 20.0                  # never the $14 the owner cannot buy
+    assert {f.price for f in db.query_flights(["PHL"], ["MCO"], date(2026, 11, 1), date(2026, 11, 30), airlines=["F9"])} == {20.0}

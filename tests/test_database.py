@@ -185,7 +185,7 @@ def test_runs_sightings_floors_and_watchlist(conn):
     assert db.routes_in_run(run, conn) == [("ILG", "TPA")]
     assert db.previous_run_for_route(run, "ILG", "TPA", conn) is None
     db.finish_run(run, {}, conn)
-    run2 = db.start_run("calendar", [("ILG", "TPA")], conn=conn)
+    run2 = db.start_run("calendar", [("ILG", "TPA")], promo_code="X", conn=conn)
     db.record_seen(run2, "ILG", "TPA", [date(2026, 10, 10)], [], conn)
     assert db.previous_run_for_route(run2, "ILG", "TPA", conn) == run
     db.finish_run(run2, {"flights_written": 3}, conn)
@@ -650,3 +650,60 @@ def test_dashboard_readers_know_the_airline(conn):
     assert [r["airline"] for r in db.route_freshness(["PHL"], ["MCO"], conn=conn, airlines=["f9"])] == ["F9"]
     assert db.selection_stats(["PHL"], ["MCO"], date(2026, 10, 1), date(2026, 10, 31), conn=conn)["flights"] == 2
     assert db.selection_stats(["PHL"], ["MCO"], date(2026, 10, 1), date(2026, 10, 31), conn=conn, airlines=["XP"])["flights"] == 1
+
+
+def test_baseline_is_a_run_of_the_same_kind_and_price_basis(conn):
+    day = [date(2026, 10, 10)]
+
+    def run(mode="calendar", promo=None, basis=db.BASIS_FARE, airline="XP"):
+        rid = db.start_run(mode, [("PHL", "MCO")], promo, conn=conn, airline=airline)
+        db.record_seen(rid, "PHL", "MCO", day, [], conn, basis=basis)
+        db.finish_run(rid, {}, conn)
+        return rid
+
+    plain, promo, mock = run(), run(promo="SAVE25"), run(mode="mock")
+    assert [db.run_is_off_floor(r, conn) for r in (plain, promo, mock, 999)] == [False, True, True, False]
+    assert db.previous_run_for_route(run(), "PHL", "MCO", conn) == plain          # not the promo run, not the mock run
+    assert db.previous_run_for_route(run(promo="SAVE25"), "PHL", "MCO", conn) == promo
+    assert db.previous_run_for_route(run(promo="OTHER"), "PHL", "MCO", conn) is None
+    assert db.previous_run_for_route(run(mode="mock"), "PHL", "MCO", conn) == mock
+    searched, calendar = run("detail", airline="F9"), run(basis=db.BASIS_CALENDAR, airline="F9")
+    cur = run("full", airline="F9")
+    assert db.previous_run_for_route(cur, "PHL", "MCO", conn, basis=db.BASIS_FARE) == searched
+    assert db.previous_run_for_route(cur, "PHL", "MCO", conn, basis=db.BASIS_CALENDAR) == calendar
+    assert db.previous_run_for_route(cur, "PHL", "MCO", conn) == calendar         # no basis asked: the latest run
+    assert db.seen_in_run(calendar, "PHL", "MCO", conn, basis=db.BASIS_FARE) == {}
+    assert db.seen_in_run(calendar, "PHL", "MCO", conn, basis=db.BASIS_CALENDAR) == {day[0]: None}
+    assert db.bases_in_run(calendar, "PHL", "MCO", conn) == [db.BASIS_CALENDAR]
+
+
+def test_sightings_from_before_the_basis_column_drop_frontier_baselines_once(tmp_path):
+    path = tmp_path / "old.db"
+    conn = db.get_connection(path)
+    xp = db.start_run("calendar", [("ILG", "TPA")], conn=conn)
+    f9_run = db.start_run("calendar", [("PHL", "MCO")], conn=conn, airline="F9")
+    conn.close()
+    raw = sqlite3.connect(path)
+    raw.executescript(f"""
+        DROP TABLE route_day_seen;
+        CREATE TABLE route_day_seen (run_id INTEGER NOT NULL, origin TEXT NOT NULL, destination TEXT NOT NULL,
+            day TEXT NOT NULL, price REAL, PRIMARY KEY (run_id, origin, destination, day));
+        INSERT INTO route_day_seen VALUES ({xp}, 'ILG', 'TPA', '2026-10-10', 49), ({f9_run}, 'PHL', 'MCO', '2026-10-10', 14);
+        INSERT INTO route_floor VALUES ('XP', 'ILG', 'TPA', 49, '2026-10-01T03:15:00'), ('XP', 'PHL', 'MCO', 80, '2026-10-01T03:15:00'),
+                                       ('F9', 'PHL', 'MCO', 14, '2026-10-01T03:15:00');
+    """)
+    raw.commit()
+    raw.close()
+    conn = db.get_connection(path)
+    # Avelo's sightings and floors are bookable fares and survive; Frontier's mixed two price bases and start again
+    assert db.seen_in_run(xp, "ILG", "TPA", conn, basis=db.BASIS_FARE) == {date(2026, 10, 10): 49}
+    assert (db.get_floor("ILG", "TPA", conn), db.get_floor("PHL", "MCO", conn)) == (49, 80)
+    assert db.seen_in_run(f9_run, "PHL", "MCO", conn) == {} and db.get_floor("PHL", "MCO", conn, airline="F9") is None
+    db.record_seen(f9_run, "PHL", "MCO", [date(2026, 10, 11)], [], conn, basis=db.BASIS_CALENDAR)
+    db.set_floor("PHL", "MCO", 20, conn, airline="F9")
+    conn.close()
+    conn = db.get_connection(path)                                  # second open: nothing is dropped again
+    assert db.seen_in_run(f9_run, "PHL", "MCO", conn) == {date(2026, 10, 11): None}
+    assert db.get_floor("PHL", "MCO", conn, airline="F9") == 20
+    assert conn.execute("SELECT COUNT(*) FROM route_floor").fetchone()[0] == 3
+    conn.close()

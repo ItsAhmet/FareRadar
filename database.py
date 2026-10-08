@@ -21,6 +21,7 @@ from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+import airlines
 import config
 import trips
 from config import DB_PATH, HISTORY_RETENTION_DAYS
@@ -81,6 +82,7 @@ CREATE TABLE IF NOT EXISTS route_day_seen (
     destination  TEXT    NOT NULL,
     day          TEXT    NOT NULL,
     price        REAL,
+    basis        TEXT    NOT NULL DEFAULT 'fare',   -- 'fare' = a bookable fare; 'calendar' = a calendar price that is not one
     PRIMARY KEY (run_id, origin, destination, day)
 );
 
@@ -173,7 +175,12 @@ MIGRATIONS: dict[tuple[str, str], str] = {
     ("price_history", "airline"): "ALTER TABLE price_history ADD COLUMN airline TEXT NOT NULL DEFAULT 'XP'",
     ("scrape_runs", "airline"): "ALTER TABLE scrape_runs ADD COLUMN airline TEXT NOT NULL DEFAULT 'XP'",
     ("events", "airline"): "ALTER TABLE events ADD COLUMN airline TEXT",  # NULL: a watch-level event, or one from before the column
+    ("route_day_seen", "basis"): "ALTER TABLE route_day_seen ADD COLUMN basis TEXT NOT NULL DEFAULT 'fare'",
 }
+
+# What a sighting's price is (route_day_seen.basis). Signals compare sightings of one basis only.
+BASIS_FARE = "fare"          # a fare the owner can book: a day search, or the calendar of an airline whose calendar is one
+BASIS_CALENDAR = "calendar"  # a calendar price that is not one (Frontier: lowest Discount Den total, any routing)
 
 UPSERT_SQL = """
 INSERT INTO avelo_flights (
@@ -226,6 +233,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
             DROP TABLE route_floor_pre_airline;
             COMMIT;
         """)
+    unmarked_sightings = "basis" not in {row["name"] for row in conn.execute("PRAGMA table_info(route_day_seen)")}
     columns: dict[str, set[str]] = {}
     for (table, column), ddl in MIGRATIONS.items():
         if table not in columns:
@@ -233,6 +241,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
         if column not in columns[table]:
             conn.execute(ddl)
             columns[table].add(column)
+    if unmarked_sightings:
+        # Sightings stored before they carried a basis mixed calendar prices and bookable fares for an airline
+        # whose calendar is not a bookable fare, and its floors were taken from both. They cannot be told apart
+        # now, so that airline starts again without a baseline (once: the column exists afterwards). Avelo's
+        # sightings and floors are all bookable fares and stay.
+        for code in sorted(c for c, a in airlines.AIRLINES.items() if not a.calendar_bookable):
+            conn.execute("DELETE FROM route_floor WHERE airline = ?", (code,))
+            conn.execute("DELETE FROM route_day_seen WHERE run_id IN (SELECT run_id FROM scrape_runs WHERE airline = ?)", (code,))
     # Indexes on migrated columns live here: SCHEMA runs before the columns exist on an old database.
     conn.execute("""CREATE INDEX IF NOT EXISTS idx_flights_airline_route
                     ON avelo_flights (airline, origin, destination, departure_datetime)""")
@@ -738,26 +754,45 @@ def last_runs(limit: int = 10, conn: sqlite3.Connection | None = None) -> list[d
 
 
 def record_seen(run_id: int, origin: str, destination: str, days: Iterable[date], flights: Iterable[Flight],
-                conn: sqlite3.Connection | None = None) -> int:
+                conn: sqlite3.Connection | None = None, basis: str = BASIS_FARE) -> int:
     """One row per scheduled day for this route in this run; price is the
-    lowest fare seen that day, or NULL when the day was not selectable."""
+    lowest fare seen that day, or NULL when the day was not selectable.
+
+    `basis` says what kind of price it is (BASIS_FARE or BASIS_CALENDAR); signals never compare across bases."""
     o, d = origin.upper(), destination.upper()
     lowest: dict[date, float] = {}
     for f in flights:
         if f.origin == o and f.destination == d:
             lowest[f.departure_date] = min(lowest.get(f.departure_date, float("inf")), f.price)
-    rows = [(run_id, o, d, day.isoformat(), lowest.get(day)) for day in sorted(set(days))]
+    rows = [(run_id, o, d, day.isoformat(), lowest.get(day), basis) for day in sorted(set(days))]
     if not rows:
         return 0
-    _run("INSERT OR REPLACE INTO route_day_seen (run_id, origin, destination, day, price) VALUES (?, ?, ?, ?, ?)",
+    _run("INSERT OR REPLACE INTO route_day_seen (run_id, origin, destination, day, price, basis) VALUES (?, ?, ?, ?, ?, ?)",
          rows, conn, many=True)
     return len(rows)
 
 
-def seen_in_run(run_id: int, origin: str, destination: str, conn: sqlite3.Connection | None = None) -> dict[date, float | None]:
-    rows = _fetch("SELECT day, price FROM route_day_seen WHERE run_id = ? AND origin = ? AND destination = ?",
-                  (run_id, origin.upper(), destination.upper()), conn)
+def seen_in_run(run_id: int, origin: str, destination: str, conn: sqlite3.Connection | None = None,
+                basis: str | None = None) -> dict[date, float | None]:
+    """What a run saw on a route, per day. `basis` keeps only the sightings of that basis (None: all of them)."""
+    rows = _fetch("""SELECT day, price FROM route_day_seen WHERE run_id = ? AND origin = ? AND destination = ?
+                     AND (? IS NULL OR basis = ?)""",
+                  (run_id, origin.upper(), destination.upper(), basis, basis), conn)
     return {date.fromisoformat(r["day"]): r["price"] for r in rows}
+
+
+def bases_in_run(run_id: int, origin: str, destination: str, conn: sqlite3.Connection | None = None) -> list[str]:
+    """The price bases of a run's sightings on one route (a Frontier run can hold both: searched days and calendar days)."""
+    rows = _fetch("SELECT DISTINCT basis FROM route_day_seen WHERE run_id = ? AND origin = ? AND destination = ? ORDER BY basis DESC",
+                  (run_id, origin.upper(), destination.upper()), conn)
+    return [r["basis"] for r in rows]
+
+
+def run_is_off_floor(run_id: int, conn: sqlite3.Connection | None = None) -> bool:
+    """Was this run made with a promo code, or is it a mock run? Its fares are not ones the owner can simply
+    book, so they never set or test a route floor, and a plain run never takes it as its baseline."""
+    rows = _fetch("SELECT mode, promo_code FROM scrape_runs WHERE run_id = ?", (run_id,), conn)
+    return bool(rows) and (rows[0]["mode"] == "mock" or bool(rows[0]["promo_code"]))
 
 
 def routes_in_run(run_id: int, conn: sqlite3.Connection | None = None) -> list[tuple[str, str]]:
@@ -766,15 +801,22 @@ def routes_in_run(run_id: int, conn: sqlite3.Connection | None = None) -> list[t
     return [(r["origin"], r["destination"]) for r in rows]
 
 
-def previous_run_for_route(run_id: int, origin: str, destination: str, conn: sqlite3.Connection | None = None) -> int | None:
-    """Latest earlier run that finished cleanly and saw this route (legacy runs have NULL status)."""
+def previous_run_for_route(run_id: int, origin: str, destination: str, conn: sqlite3.Connection | None = None,
+                           basis: str | None = None) -> int | None:
+    """Latest earlier run that finished cleanly and saw this route (legacy runs have NULL status), of the same
+    airline and the same kind: a plain run's baseline is a plain run, a promo run's is a run with the same
+    code, a mock run's is a mock run. With `basis`, the run must hold a sighting of that price basis."""
     rows = _fetch(
         """SELECT MAX(s.run_id) AS prev FROM route_day_seen s
            JOIN scrape_runs r ON r.run_id = s.run_id
+           JOIN scrape_runs cur ON cur.run_id = ?
            WHERE s.run_id < ? AND s.origin = ? AND s.destination = ?
+             AND (? IS NULL OR s.basis = ?)
              AND r.finished_at IS NOT NULL AND COALESCE(r.status, 'ok') = 'ok'
-             AND r.airline = (SELECT airline FROM scrape_runs WHERE run_id = ?)""",
-        (run_id, origin.upper(), destination.upper(), run_id), conn)
+             AND r.airline = cur.airline
+             AND COALESCE(r.promo_code, '') = COALESCE(cur.promo_code, '')
+             AND (r.mode = 'mock') = (cur.mode = 'mock')""",
+        (run_id, run_id, origin.upper(), destination.upper(), basis, basis), conn)
     return rows[0]["prev"] if rows and rows[0]["prev"] is not None else None
 
 

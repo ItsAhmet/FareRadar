@@ -173,7 +173,8 @@ def parse_airline_codes(raw: str) -> list[str]:
     return known or ["XP"]
 
 
-# Which airlines a scrape covers when --airlines is not given. Avelo only until the dashboard can show Frontier.
+# Which airlines a scrape covers when --airlines is not given. Avelo only by default: the dashboard shows Frontier
+# fares, but scraping Frontier (also nightly) is opt-in with AVELO_AIRLINES=XP,F9.
 # It also caps --from-rules (the nightly job): a saved rule or watch never adds an airline that is not listed here.
 ACTIVE_AIRLINES: list[str] = parse_airline_codes(os.getenv("AVELO_AIRLINES", "XP"))
 

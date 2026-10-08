@@ -28,6 +28,9 @@ class Airline:
     name: str
     member_program: str
     color: tuple[int, int, int]
+    # Is the fare calendar's price for a day a fare the owner can book on a nonstop? Avelo's is. Frontier's is
+    # the lowest Discount Den total of any routing, often a connection: a different price basis from a day search.
+    calendar_bookable: bool = True
 
     def site_code(self, app_code: str) -> str:
         """The airport code this airline's site uses for one of the app's codes."""
@@ -47,7 +50,7 @@ class Airline:
 
 AIRLINES: dict[str, Airline] = {
     "XP": Airline("XP", "Avelo", "Avelo PLUS", (88, 28, 135)),
-    "F9": Airline("F9", "Frontier", "Discount Den", (0, 102, 67)),
+    "F9": Airline("F9", "Frontier", "Discount Den", (0, 102, 67), calendar_bookable=False),
 }
 
 

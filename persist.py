@@ -61,7 +61,10 @@ def save_calendar(run_id: int | None, origin: str, dest: str, covered_days: Iter
             if removed:
                 log.info("%s→%s %s: no longer offered, removed %d stored fare(s)", origin, dest, day, removed)
     if run_id is not None and covered:
-        database.record_seen(run_id, origin, dest, covered, flights, conn)
+        # Frontier's calendar price is not a fare the owner can book (lowest Discount Den total of any routing):
+        # its sightings are kept apart from day-search sightings, so signals never compare one with the other.
+        basis = database.BASIS_FARE if airlines.get(airline).calendar_bookable else database.BASIS_CALENDAR
+        database.record_seen(run_id, origin, dest, covered, flights, conn, basis=basis)
     database.drop_shadowed_placeholders(origin, dest, conn, airline=airline)
     return written
 

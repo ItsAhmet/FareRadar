@@ -95,6 +95,15 @@ def package_label(it: Itinerary) -> str:
             f" · {it.airline_label}")
 
 
+def unverified_note(out: Flight, back: Flight) -> str:
+    """A marker for a package total that is not a price the owner can count on: a leg is a calendar placeholder
+    of an airline whose calendar price is not a bookable fare (Frontier: the lowest Discount Den total of any
+    routing, so the nonstop's standard fare can be much higher). '' when both legs are bookable fares."""
+    names = sorted({airline_registry.get(leg.airline or "XP").name for leg in (out, back)
+                    if not leg.time_known and not airline_registry.get(leg.airline or "XP").calendar_bookable})
+    return f" (unverified {' & '.join(names)} calendar price: times and fare need a detail scrape)" if names else ""
+
+
 def rule_payload(
     destinations: list[str],
     availability: Availability,
@@ -259,7 +268,7 @@ def pending_packages(conn: sqlite3.Connection | None = None) -> tuple[list[Event
             drop = base - total
             if drop >= config.ALERT_MIN_DROP_USD or (base and drop / base >= config.ALERT_MIN_DROP_PCT):
                 mine.append(Event("price_drop", out.origin, out.destination, out.departure_date,
-                                  f"Watched: {watch['label']} dropped ${drop:.0f} to ${total:.0f}",
+                                  f"Watched: {watch['label']} dropped ${drop:.0f} to ${total:.0f}{unverified_note(out, back)}",
                                   {"watch_id": watch["watch_id"], "from": base, "to": total, "airlines": flown},
                                   airline=out.airline))
                 base, alerting = total, True
@@ -306,11 +315,14 @@ def pending_rules(conn: sqlite3.Connection | None = None, today: date | None = N
         mine: list[Event] = []
         for k in new_keys[:max_new]:
             it = keys[k]
+            note = unverified_note(it.outbound, it.inbound)
+            detail = {"watch_id": watch["watch_id"], "package": package_key(it), "total": it.total_price,
+                      "airlines": _leg_airlines(it.outbound, it.inbound)}
+            if note:
+                detail["unverified"] = True
             mine.append(Event("rule_match", it.outbound.origin, it.outbound.destination, it.outbound.departure_date,
-                                f"Rule '{watch['label']}': {package_label(it)} for ${it.total_price:.0f}",
-                                {"watch_id": watch["watch_id"], "package": package_key(it), "total": it.total_price,
-                                 "airlines": _leg_airlines(it.outbound, it.inbound)},
-                                airline=it.outbound.airline))
+                                f"Rule '{watch['label']}': {package_label(it)} {'from' if note else 'for'} ${it.total_price:.0f}{note}",
+                                detail, airline=it.outbound.airline))
         if len(new_keys) > max_new:
             mine.append(Event("rule_match", None, None, None,
                                 f"Rule '{watch['label']}': {len(new_keys) - max_new} more new matches in the app",

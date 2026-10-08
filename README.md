@@ -45,7 +45,7 @@ source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 playwright install chromium        # one-time browser download (~100 MB)
 cp .env.example .env               # optional: tweak headless mode, DB path, etc.
-pytest -q                          # 357 tests, no network needed
+pytest -q                          # 376 tests, no network needed
 ```
 
 The project lives in `~/avelo-finder`, outside iCloud-synced folders. To start
@@ -82,8 +82,14 @@ for airlines listed in `AVELO_AIRLINES`: a rule that names Frontier does not scr
 Frontier fares are shown next to Avelo's: packages mix airlines (fly out on one, back on the other) with each leg
 labelled, the fare calendar and the freshness table read both, and every airline's runs raise their own signals, floors and
 alerts (a Frontier sale never moves Avelo's floor or raises an "Avelo sale"). A rule saved before Frontier existed stays
-Avelo-only. Only nonstop Frontier flights are kept. Each airline gets its own scrape run, so baselines compare like with
-like. Carry-on bags are estimated per leg (`AVELO_CARRY_ON_XP`, `AVELO_CARRY_ON_F9`) and counted only when a query asks;
+Avelo-only. Only nonstop Frontier flights are kept. Each airline gets its own scrape run, and signals compare like with
+like only: a Frontier calendar price (the day's lowest Discount Den total of any routing, often a connection) is compared
+with earlier calendar prices, a day search's nonstop fare with earlier day searches, never one with the other. So a
+`--mode full` run followed by the nightly calendar run raises nothing while fares stand still. A route floor is the lowest
+fare you could simply book: Frontier calendar prices, promo-code runs and `--mock` runs never set or test it, and a
+promo or mock run is a baseline only for a later run of the same kind (same code, or mock). A rule match or watched
+package priced from a Frontier calendar price is pushed as "from $X (unverified Frontier calendar price …)" until a
+detail or full run confirms the nonstop's times and fare. Carry-on bags are estimated per leg (`AVELO_CARRY_ON_XP`, `AVELO_CARRY_ON_F9`) and counted only when a query asks;
 Avelo PLUS perks apply to Avelo legs only, and a package shows what a membership would save on legs you pay the public
 fare on.
 
@@ -227,7 +233,7 @@ AVELO_DB_PATH=/tmp/demo.db python run_scraper.py --mock --mock-sale 0.25 --desti
   detached, so closing the dashboard doesn't close it.
   CLI: `python handoff.py --legs ILG-TPA:2026-10-09,LAL-ILG:2026-10-12`; each
   leg is `ORG-DST:DATE[:AIRLINE]` and the airline defaults to `XP` (Avelo), so
-  a Frontier leg is `ILG-MCO:2026-10-09:F9`.
+  a Frontier leg is `PHL-MCO:2026-10-09:F9`.
 * **✅ Mark as booked**: record what you paid. After every scrape the trip's
   current fare is compared with it ("you beat the market by $X", or a push
   alert when it is $10+ cheaper and rebooking might pay). Bookings live in

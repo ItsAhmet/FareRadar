@@ -10,6 +10,14 @@ new_floor   the route hit a lower fare than ever recorded
 floor_fare  a day sits at the route's lowest-ever fare (informational)
 floor_gone  a day that was at the floor moved up (cheap seats gone)
 
+Only like is compared with like. A sighting carries its price basis: a bookable
+fare, or a calendar price that is not one (Frontier's calendar shows the lowest
+Discount Den total of any routing, a day search the nonstop's standard fare). A
+run is compared, per basis, with the previous run that holds sightings of that
+basis, and only with a run of its own kind: a promo-code run with a run under
+the same code, a mock run with a mock run. Route floors are the lowest fare the
+owner could simply book, so only plain runs' bookable fares set or test them.
+
 Pure functions here; `run_detection` is the thin DB wrapper.
 """
 from __future__ import annotations
@@ -42,9 +50,10 @@ class Event:
         return f"{self.origin}→{self.destination}" if self.origin and self.destination else ""
 
 
-def _label(origin: str, destination: str, airline: str = "XP") -> str:
+def _label(origin: str, destination: str, airline: str = "XP", basis: str = database.BASIS_FARE) -> str:
     place = airport_name(destination) if config.is_home(origin) else airport_name(origin)
-    return f"{airline_registry.get(airline).name} {origin}→{destination} ({place})"
+    note = ", unverified calendar price" if basis == database.BASIS_CALENDAR else ""
+    return f"{airline_registry.get(airline).name} {origin}→{destination} ({place}{note})"
 
 
 def detect_route(
@@ -55,20 +64,27 @@ def detect_route(
     floor: float | None,
     allow_sold_out: bool = True,
     airline: str = "XP",
+    track_floor: bool = True,
+    basis: str = database.BASIS_FARE,
 ) -> tuple[list[Event], float | None]:
     """Compare this run's sightings with the previous run's for one route.
 
-    `floor` is this airline's floor on the route. Returns the events raised (each carries the airline) and
-    the new floor price.
+    `prev` and `cur` must hold sightings of the same price `basis`. `floor` is this airline's floor on the
+    route. Returns the events raised (each carries the airline) and the new floor price. With
+    `track_floor=False` the floor is neither tested nor moved: no new_floor, floor_fare or floor_gone, and the
+    floor passed in is returned as it was.
     """
     events: list[Event] = []
     cur_priced = {d: p for d, p in cur.items() if p is not None}
     if not cur_priced and not prev:
         return events, floor
+    given = floor
+    if not track_floor:
+        floor = None
 
     prices = list(cur_priced.values())
-    new_floor = min(prices + ([floor] if floor is not None else [])) if prices else floor
-    label = _label(origin, destination, airline)
+    new_floor = min(prices + ([floor] if floor is not None else [])) if prices and track_floor else floor
+    label = _label(origin, destination, airline, basis)
 
     if floor is not None and new_floor is not None and new_floor < floor:
         days = sorted(d for d, p in cur_priced.items() if p == new_floor)
@@ -106,22 +122,30 @@ def detect_route(
                                 f"{label}: {d:%a %b %d} at the ${new_floor:.0f} floor fare",
                                 {"floor": new_floor}, notify=False, airline=airline))
 
-    return events, new_floor
+    if basis != database.BASIS_FARE:
+        for e in events:
+            e.detail["basis"] = basis
+    return events, (new_floor if track_floor else given)
 
 
 def run_detection(run_id: int, conn: sqlite3.Connection | None = None, allow_sold_out: bool = True) -> list[Event]:
-    """Detect signals for every route this run saw, against the previous clean run and the floor of the same airline."""
+    """Detect signals for every route this run saw, against the previous clean run of the same airline and kind,
+    one price basis at a time, and (plain runs' bookable fares only) the airline's floor."""
     airline = database.run_airline(run_id, conn) or "XP"
+    plain = not database.run_is_off_floor(run_id, conn)   # no promo code, not a mock run
     all_events: list[Event] = []
     for origin, dest in database.routes_in_run(run_id, conn):
-        cur = database.seen_in_run(run_id, origin, dest, conn)
-        prev_id = database.previous_run_for_route(run_id, origin, dest, conn)
-        prev = database.seen_in_run(prev_id, origin, dest, conn) if prev_id is not None else None
-        floor = database.get_floor(origin, dest, conn, airline=airline)
-        events, new_floor = detect_route(origin, dest, prev, cur, floor, allow_sold_out=allow_sold_out, airline=airline)
-        if new_floor is not None and new_floor != floor:
-            database.set_floor(origin, dest, new_floor, conn, airline=airline)
-        all_events.extend(events)
+        for basis in database.bases_in_run(run_id, origin, dest, conn):
+            cur = database.seen_in_run(run_id, origin, dest, conn, basis=basis)
+            prev_id = database.previous_run_for_route(run_id, origin, dest, conn, basis=basis)
+            prev = database.seen_in_run(prev_id, origin, dest, conn, basis=basis) if prev_id is not None else None
+            track_floor = plain and basis == database.BASIS_FARE
+            floor = database.get_floor(origin, dest, conn, airline=airline) if track_floor else None
+            events, new_floor = detect_route(origin, dest, prev, cur, floor, allow_sold_out=allow_sold_out,
+                                             airline=airline, track_floor=track_floor, basis=basis)
+            if track_floor and new_floor is not None and new_floor != floor:
+                database.set_floor(origin, dest, new_floor, conn, airline=airline)
+            all_events.extend(events)
     database.add_events(run_id, all_events, conn)
     if all_events:
         log.info("signals: %s", ", ".join(f"{e.kind}×{sum(1 for x in all_events if x.kind == e.kind)}"

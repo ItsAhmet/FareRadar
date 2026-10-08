@@ -163,3 +163,128 @@ def test_each_airline_has_its_own_floor_and_labels():
     db.record_seen(xp2, "PHL", "MCO", days, priced("XP", 100), conn)
     assert "sale_wave" not in kinds(run_detection(xp2, conn))        # Avelo compares with Avelo's run, not Frontier's
     conn.close()
+
+
+# --- only like is compared with like: price basis (Frontier calendar vs day search), promo runs, mock runs ---
+
+import persist  # noqa: E402
+
+F9_DAYS = [date(2026, 11, 10 + i) for i in range(6)]
+
+
+def _f9_calendar(day, den):
+    """What frontier.parse_calendar yields: the day's lowest Discount Den total, any routing."""
+    return Flight(airline="F9", origin="PHL", destination="MCO", departure_datetime=datetime(day.year, day.month, day.day),
+                  price=den, member_price=den, flight_id="F9CAL-PHL-MCO")
+
+
+def _f9_nonstop(day, standard, den):
+    """What frontier.parse_select yields for a nonstop."""
+    return Flight(airline="F9", origin="PHL", destination="MCO", departure_datetime=datetime(day.year, day.month, day.day, 7),
+                  arrival_datetime=datetime(day.year, day.month, day.day, 9, 40), price=standard, base_price=standard,
+                  member_price=den, flight_number="2415", flight_id="F9-2415-PHL-MCO", duration_minutes=160)
+
+
+def _f9_run(conn, mode, standard=204.0, den=139.0, nonstop_den=199.0):
+    """One Frontier run: 'detail' searches every day, 'calendar' reads the calendar only."""
+    run = db.start_run(mode, [("PHL", "MCO")], conn=conn, airline="F9")
+    if mode == "detail":
+        for d in F9_DAYS:
+            persist.save_day(run, "PHL", "MCO", d, [_f9_nonstop(d, standard, nonstop_den)], conn, airline="F9")
+    else:
+        persist.save_calendar(run, "PHL", "MCO", F9_DAYS, [_f9_calendar(d, den) for d in F9_DAYS], conn, airline="F9")
+    events = run_detection(run, conn)
+    db.finish_run(run, {}, conn, status="ok")
+    return events
+
+
+def _loud(events):
+    return sorted(e.kind for e in events if e.notify)
+
+
+def test_frontier_detail_run_then_calendar_run_is_not_a_sale():
+    # nonstops cost $204 on every day and nothing changed; the calendar shows $139 (a connection's Discount Den fare)
+    conn = db.get_connection(":memory:")
+    _f9_run(conn, "detail")
+    events = _f9_run(conn, "calendar")
+    assert events == [] and db.get_floor("PHL", "MCO", conn, airline="F9") == 204.0     # the floor is a fare the owner can buy
+    assert _f9_run(conn, "detail") == []                                               # and back again: nothing left the floor
+    assert _f9_run(conn, "calendar") == []
+    conn.close()
+
+
+def test_frontier_calendar_run_then_detail_run_is_not_floor_gone():
+    conn = db.get_connection(":memory:")
+    assert _f9_run(conn, "calendar") == [] and db.get_floor("PHL", "MCO", conn, airline="F9") is None
+    events = _f9_run(conn, "detail")
+    assert _loud(events) == [] and kinds(events) == ["floor_fare"] * 6                   # the first bookable fares: quiet
+    assert db.get_floor("PHL", "MCO", conn, airline="F9") == 204.0
+    conn.close()
+
+
+def test_one_dollar_discount_den_gap_raises_nothing_in_either_order():
+    conn = db.get_connection(":memory:")
+    for mode in ("detail", "calendar", "detail", "calendar"):
+        assert _loud(_f9_run(conn, mode, standard=60.0, den=59.0, nonstop_den=59.0)) == []
+    assert db.get_floor("PHL", "MCO", conn, airline="F9") == 60.0
+    conn.close()
+
+
+def test_frontier_runs_of_one_basis_still_raise_their_signals():
+    conn = db.get_connection(":memory:")
+    _f9_run(conn, "calendar", den=139.0)
+    _f9_run(conn, "detail", standard=204.0)
+    wave = _f9_run(conn, "calendar", den=89.0)                       # calendar against the earlier calendar run
+    assert kinds(wave) == ["sale_wave"]                              # a calendar price never sets or tests the floor
+    assert wave[0].message.startswith("Frontier PHL→MCO (Orlando, unverified calendar price): sale wave")
+    assert wave[0].detail["basis"] == "calendar" and wave[0].airline == "F9"
+    assert db.get_floor("PHL", "MCO", conn, airline="F9") == 204.0
+    real = _f9_run(conn, "detail", standard=150.0)                   # day searches against the earlier day searches
+    assert _loud(real) == ["new_floor", "sale_wave"] and db.get_floor("PHL", "MCO", conn, airline="F9") == 150.0
+    assert all(e.message.startswith("Frontier PHL→MCO (Orlando):") and "basis" not in e.detail for e in real)
+    gone = _f9_run(conn, "detail", standard=204.0)
+    assert _loud(gone) == ["floor_gone"] * 6
+    conn.close()
+
+
+def _plain_run(conn, price, mode="calendar", promo=None, airline="XP", fid="LOWFARE-ILG-TPA"):
+    days = [D(2), D(4), D(6), D(9), D(11)]
+    run = db.start_run(mode, [("ILG", "TPA")], promo, conn=conn, airline=airline)
+    fares = [Flight(airline=airline, origin="ILG", destination="TPA", departure_datetime=datetime(2026, 10, d.day),
+                    price=price, promo_code=promo, flight_id=fid) for d in days]
+    db.record_seen(run, "ILG", "TPA", days, fares, conn)
+    events = run_detection(run, conn)
+    db.finish_run(run, {}, conn, status="ok")
+    return events
+
+
+def test_promo_run_never_moves_the_floor_or_becomes_a_plain_runs_baseline():
+    for airline in ("XP", "F9"):
+        conn = db.get_connection(":memory:")
+        floor = lambda: db.get_floor("ILG", "TPA", conn, airline=airline)  # noqa: E731
+        _plain_run(conn, 60, airline=airline)
+        assert _plain_run(conn, 45, promo="SAVE25", airline=airline) == [] and floor() == 60   # no floor, no wave, no floor_fare
+        assert _plain_run(conn, 60, airline=airline) == [] and floor() == 60                   # no floor_gone: nothing moved
+        low = _plain_run(conn, 50, airline=airline)                  # a real low above the promo fare is still announced
+        assert _loud(low) == ["new_floor", "sale_wave"] and floor() == 50
+        again = _plain_run(conn, 30, promo="SAVE25", airline=airline)   # compared with the earlier run under the same code
+        assert kinds(again) == ["sale_wave"] and floor() == 50
+        assert _plain_run(conn, 30, promo="OTHER", airline=airline) == []
+        conn.close()
+
+
+def test_mock_run_never_moves_the_floor_and_is_compared_with_mock_runs_only():
+    conn = db.get_connection(":memory:")
+    _plain_run(conn, 100)
+    assert _plain_run(conn, 50, mode="mock") == [] and db.get_floor("ILG", "TPA", conn) == 100
+    assert _plain_run(conn, 100) == [] and db.get_floor("ILG", "TPA", conn) == 100
+    assert kinds(_plain_run(conn, 30, mode="mock")) == ["sale_wave"]      # the --mock-sale demo still shows its wave
+    assert db.get_floor("ILG", "TPA", conn) == 100
+    conn.close()
+
+
+def test_detect_route_without_floor_tracking_keeps_the_floor_it_was_given():
+    prev = {D(2): 53.0, D(4): 53.0, D(6): 53.0, D(9): 53.0, D(11): 53.0}
+    cur = {D(2): 30.0, D(4): 74.0, D(6): 30.0, D(9): None, D(11): 53.0}
+    events, floor = detect_route("ILG", "TPA", prev, cur, 53.0, track_floor=False)
+    assert floor == 53.0 and kinds(events) == ["sale_wave", "sold_out"]

@@ -532,3 +532,140 @@ def test_membership_change_can_still_alert_a_booked_trip(conn, monkeypatch):
     db.set_membership("F9", True, conn)
     assert alerts.evaluate_and_deliver(None, [], conn)["watch_events"] == 1
     assert [e["kind"] for e in _feed(conn)] == ["booked_drop"]
+
+
+# --- a Frontier calendar price is not a fare the owner can buy: pushes built on one say so ---
+
+
+def _f9_placeholder(origin, dest, day, den):
+    """A Frontier calendar row as stored for a non-member: the day's lowest Discount Den total, any routing."""
+    return Flight(airline="F9", origin=origin, destination=dest, departure_datetime=datetime(2026, 10, day), price=den,
+                  member_price=den, flight_id=f"F9CAL-{origin}-{dest}")
+
+
+def _f9_nonstop(origin, dest, day, hour, price):
+    return Flight(airline="F9", origin=origin, destination=dest, departure_datetime=datetime(2026, 10, day, hour),
+                  arrival_datetime=datetime(2026, 10, day, hour + 2, 40), price=price, base_price=price, member_price=price - 10,
+                  duration_minutes=160, flight_number="2415", flight_id=f"F9-2415-{origin}-{dest}")
+
+
+def _orlando_rule(conn, airlines):
+    payload = alerts.rule_payload(["MCO"], Availability(2, time(18), 6, time(23, 59)), 1, 900, True, 100, span_days=14,
+                                  origins=["PHL"], airlines=airlines)
+    db.add_watch("rule", "Orlando", payload, conn)
+
+
+def test_rule_match_on_frontier_calendar_prices_is_marked_unverified(conn):
+    db.upsert_flights([_f9_placeholder("PHL", "MCO", 8, 139.0), _f9_placeholder("MCO", "PHL", 11, 139.0)], conn)
+    _orlando_rule(conn, ["F9"])
+    (event,), _writes = alerts.pending_rules(conn, today=date(2026, 10, 1))
+    assert event.kind == "rule_match" and event.detail["unverified"] is True and event.detail["total"] == 278.0
+    assert event.message.endswith("· Frontier from $278 (unverified Frontier calendar price: times and fare need a detail scrape)")
+    assert "for $278" not in event.message
+
+
+def test_rule_match_on_searched_frontier_nonstops_is_a_plain_price(conn):
+    db.upsert_flights([_f9_nonstop("PHL", "MCO", 8, 19, 204.0), _f9_nonstop("MCO", "PHL", 11, 15, 204.0)], conn)
+    _orlando_rule(conn, ["F9"])
+    (event,), _writes = alerts.pending_rules(conn, today=date(2026, 10, 1))
+    assert event.message.endswith("· Frontier for $408") and "unverified" not in event.detail
+
+
+def test_one_frontier_calendar_leg_marks_a_mixed_package(conn):
+    db.upsert_flights([f("PHL", "MCO", 8, 19, 100), _f9_placeholder("MCO", "PHL", 11, 139.0)], conn)
+    _orlando_rule(conn, ["XP", "F9"])
+    (event,), _writes = alerts.pending_rules(conn, today=date(2026, 10, 1))
+    assert "from $239 (unverified Frontier calendar price" in event.message and event.detail["unverified"] is True
+
+
+def test_avelo_calendar_fares_are_bookable_and_not_marked(conn):
+    # Avelo's calendar fare is the nonstop member fare itself
+    db.upsert_flights([Flight(origin=o, destination=d, departure_datetime=datetime(2026, 10, day), price=price,
+                              flight_id=f"LOWFARE-{o}-{d}") for o, d, day, price in (("PHL", "MCO", 8, 60), ("MCO", "PHL", 11, 70))], conn)
+    _orlando_rule(conn, ["XP"])
+    (event,), _writes = alerts.pending_rules(conn, today=date(2026, 10, 1))
+    assert event.message.endswith("· Avelo for $130") and "unverified" not in event.detail
+    span = (date(2026, 10, 1), date(2026, 10, 31))
+    out, back = db.query_flights(["PHL"], ["MCO"], *span, conn=conn)[0], db.query_flights(["MCO"], ["PHL"], *span, conn=conn)[0]
+    assert not out.time_known and alerts.unverified_note(out, back) == ""
+
+
+def test_watched_frontier_calendar_package_drop_is_marked_unverified(conn):
+    out, back = _f9_placeholder("PHL", "MCO", 8, 139.0), _f9_placeholder("MCO", "PHL", 11, 139.0)
+    db.upsert_flights([out, back], conn)
+    (it,) = build_itineraries([out], [back], GetawayQuery({"MCO"}, [Window(datetime(2026, 10, 7, 18), datetime(2026, 10, 11, 23, 59))],
+                                                           origins=["PHL"]))
+    alerts.watch_package(it, conn)
+    assert alerts.evaluate_packages(conn) == []
+    db.upsert_flights([_f9_placeholder("PHL", "MCO", 8, 99.0)], conn)
+    (event,) = alerts.evaluate_packages(conn)
+    assert event.kind == "price_drop" and event.message.endswith("dropped $40 to $238 (unverified Frontier calendar price: "
+                                                                   "times and fare need a detail scrape)")
+
+
+# --- a push that fails does not consume the alert: rule matches and vanished watches are retried, once ---
+
+
+def _failing_channel(monkeypatch):
+    monkeypatch.setattr(config, "OFFLINE", False)
+    monkeypatch.setattr(config, "NTFY_TOPIC", "test-topic")
+    monkeypatch.setattr(config, "SMTP_HOST", "")
+    sent, outcome = [], {"ok": False}
+
+    def fake_ntfy(title, body, topic=None, server=None):
+        sent.append((title, body))
+        return outcome["ok"]
+
+    monkeypatch.setattr(alerts, "notify_ntfy", fake_ntfy)
+    return sent, outcome
+
+
+def _coming_weekend():
+    from datetime import timedelta
+
+    fri = date.today() + timedelta(days=10)
+    while fri.weekday() != 4:
+        fri += timedelta(days=1)
+    return fri, fri + timedelta(days=2)
+
+
+def _xp(origin, dest, day, hour, price):
+    return Flight(origin=origin, destination=dest, departure_datetime=datetime.combine(day, time(hour)), price=price,
+                  duration_minutes=150, flight_id=f"AVELO-{origin}-{dest}")
+
+
+def test_a_failed_rule_match_push_is_retried_once(conn, monkeypatch):
+    sent, outcome = _failing_channel(monkeypatch)
+    fri, sun = _coming_weekend()
+    payload = alerts.rule_payload(["TPA"], Availability(4, time(0, 0), 6, time(23, 59)), 1, 900, True, 100,
+                                  origins=["ILG"], airlines=["XP"])
+    db.add_watch("rule", "r", payload, conn)
+    db.upsert_flights([_xp("ILG", "TPA", fri, 9, 50), _xp("TPA", "ILG", sun, 15, 60)], conn)
+    first = alerts.evaluate_and_deliver(None, [], conn)
+    assert first["delivered"] is False and db.list_events(conn=conn) == []
+    assert "matched" not in db.list_watches("rule", conn)[0]["state"]            # the match is not recorded as announced
+    outcome["ok"] = True
+    second = alerts.evaluate_and_deliver(None, [], conn)
+    assert second["delivered"] and [e["kind"] for e in db.list_events(conn=conn)] == ["rule_match"]
+    third = alerts.evaluate_and_deliver(None, [], conn)
+    assert third["pushed"] == 0 and len(sent) == 2                               # one failed try, one delivery, no repeat
+
+
+def test_a_failed_watch_unavailable_push_is_retried_once(conn, monkeypatch):
+    sent, outcome = _failing_channel(monkeypatch)
+    fri, sun = _coming_weekend()
+    out, back = _xp("ILG", "TPA", fri, 9, 50), _xp("TPA", "ILG", sun, 15, 60)
+    db.upsert_flights([out, back], conn)
+    window = Window(datetime.combine(fri, time(0)), datetime.combine(sun, time(23, 59)))
+    (it,) = build_itineraries([out], [back], GetawayQuery(destinations={"TPA"}, windows=[window], origins=["ILG"]))
+    alerts.watch_package(it, conn)
+    conn.execute("DELETE FROM avelo_flights WHERE origin = 'TPA'")
+    conn.commit()
+    first = alerts.evaluate_and_deliver(None, [], conn)
+    assert first["delivered"] is False and not db.list_watches("package", conn)[0]["state"].get("unavailable")
+    assert db.list_events(conn=conn) == []
+    outcome["ok"] = True
+    alerts.evaluate_and_deliver(None, [], conn)
+    alerts.evaluate_and_deliver(None, [], conn)
+    assert len(sent) == 2 and [e["kind"] for e in db.list_events(conn=conn)] == ["watch_unavailable"]
+    assert db.list_watches("package", conn)[0]["state"]["unavailable"] is True
