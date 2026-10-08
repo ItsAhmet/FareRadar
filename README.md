@@ -1,12 +1,16 @@
 # Avelo Finder — Flexible Getaways from ILG
 
-Personal getaway finder for Avelo Airlines nonstops out of **Wilmington, DE
-(ILG)**. It scrapes Avelo's fares (Avelo PLUS member pricing) into SQLite, then
-builds **weekend packages** that fit a recurring free window such as
-"Wednesday 6 pm to Sunday midnight", mixing airports where it makes sense: fly
-into TPA and home from LAL, or into CHS and home from SAV.
+Personal getaway finder for nonstop flights out of **Wilmington, DE (ILG)**,
+**Philadelphia (PHL)** and **Baltimore (BWI)** on two airlines: **Avelo Airlines**
+and **Frontier**. It scrapes both airlines' fares into SQLite, prices each
+fare at what *you* pay (Avelo PLUS member fare, Frontier Discount Den fare only
+if you tell it you are a member), then builds **weekend packages** that fit a
+recurring free window such as "Wednesday 6 pm to Sunday midnight". Packages mix
+airports (fly into TPA and home from LAL, or into CHS and home from SAV) and
+airlines (out on one, back on the other), and can return to a different home
+airport if you allow it.
 
-Destinations (all 16 nonstop cities Avelo serves from ILG):
+Avelo's 16 nonstop cities from ILG:
 
 | Region | Airports |
 |---|---|
@@ -15,9 +19,13 @@ Destinations (all 16 nonstop cities Avelo serves from ILG):
 | Tennessee | BNA |
 | Caribbean | SJU |
 
+Frontier's destinations from PHL and BWI are read from its public route pages
+and added to the destination list as they are discovered.
+
 ```
 avelo-finder/
 ├── app.py            Streamlit dashboard (system map, filters, packages)
+├── views.py          pure dashboard logic: served destinations, scrape plan, airline comparison, map arcs, program meter
 ├── scraper.py        Avelo Playwright scraper (+ pure HTML parsers, target planner)
 ├── frontier.py       Frontier scraper (+ pure parsers, route-catalog refresh)
 ├── browser.py        BaseScraper shared by every airline scraper (stealth, cookies, retry, snapshots)
@@ -45,7 +53,7 @@ source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 playwright install chromium        # one-time browser download (~100 MB)
 cp .env.example .env               # optional: tweak headless mode, DB path, etc.
-pytest -q                          # 376 tests, no network needed
+pytest -q                          # 449 tests, no network needed
 ```
 
 The project lives in `~/avelo-finder`, outside iCloud-synced folders. To start
@@ -53,22 +61,25 @@ the dashboard with one click, use `~/Desktop/Avelo Finder.command`.
 
 ## Filter-before-scrape
 
-Nothing is scraped when the dashboard loads. Pick destinations (region
-checkboxes or **Select all routes**), your weekly free window, and a date
-span, then press **Execute Target Scrape**. The button builds a
+Nothing is scraped when the dashboard loads. Pick home airports and airlines,
+destinations (region checkboxes or **Select all routes**), your weekly free window,
+and a date span, then press **Execute Target Scrape**. The button builds a
 `run_scraper.py` command from exactly those inputs, e.g.
 
 ```bash
-python run_scraper.py --destinations TPA,LAL --start 2026-10-01 --end 2026-10-14 --mode calendar --purge
+python run_scraper.py --airlines XP --origins ILG --destinations TPA,LAL --start 2026-10-01 --end 2026-10-14 --mode calendar --purge
 ```
 
 and the scraper visits only ILG⇄TPA and ILG⇄LAL on days Avelo actually flies
 them (it captures Avelo's own schedule feed first and intersects). Routes with
-no flight in the span are reported as skipped.
+no flight in the span are reported as skipped. The caption under the button
+states what will run, per airline ("Avelo 8 · Frontier up to 4 (route list not
+fetched yet)"): Frontier's route count is an estimate ("up to" or "at least")
+until its route list for the selected home airports has been fetched.
 
 ### Frontier
 
-Frontier Airlines is scraped alongside Avelo by default (`AVELO_AIRLINES=XP,F9`). To scrape Avelo only, pass `--airlines XP` or set `AVELO_AIRLINES=XP` in `.env`:
+Frontier Airlines is scraped alongside Avelo by default (`AVELO_AIRLINES=XP,F9`), and the dashboard's **Airlines** filter lists both. To scrape Avelo only, pass `--airlines XP` or set `AVELO_AIRLINES=XP` in `.env`:
 
 ```bash
 python run_scraper.py --airlines F9 --origins PHL --destinations MCO --days 21 --mode full
@@ -94,8 +105,9 @@ Avelo PLUS perks apply to Avelo legs only, and a package shows what a membership
 fare on.
 
 Known limits: Frontier's public route page lists only about 20 of ~30 destinations per home airport, so for a route that
-is not listed pass it with `--routes`. The dashboard has no controls yet for airlines, open-jaw returns, carry-on or
-memberships (planned for Phase 4).
+is not listed pass it with `--routes`. Carry-on fees are estimates, not scraped. Frontier's bot-challenge page has never been
+seen live, so a blocked run would show as a plain scrape error. A Frontier route floor is set only by detail or full runs,
+never by the calendar-only nightly job.
 
 Other useful invocations:
 
@@ -258,25 +270,45 @@ scrape: departed flights are deleted and price history older than
 streamlit run app.py
 ```
 
-* **System map** at the top: your primary home airport as the hub, with arcs to every selected destination,
-  coloured by region; unselected airports stay grey. It redraws as you change
-  the selection.
-* **Sidebar**: region checkboxes and Select-all, airport fine-tuning, the
+* **System map** at the top: every selected home airport as a hub, with one arc per
+  airline that flies each route to the destinations on offer (coloured by airline),
+  destination dots coloured by region; unselected airports stay grey. It redraws as you
+  change the selection.
+* **Sidebar, "From & with"**: **Home airports** (ILG, PHL, BWI; all selected by default),
+  **Airlines** (Avelo and Frontier; both by default), **Return to a different home
+  airport** (open-jaw: off means every trip comes back to the airport it left from, where
+  your car is; it needs two home airports), and **Count a carry-on bag** (adds each
+  airline's estimated carry-on fee per leg; off by default). The destination list below
+  offers only airports that at least one selected airline serves from at least one
+  selected home airport, and drops a selected destination the new choice no longer serves.
+  With no airline or no home airport selected the page says so instead of showing an empty
+  table.
+* **Sidebar, the rest**: region checkboxes and Select-all, airport fine-tuning, the
   weekly free window (weekday + time for "free from" and "back by"), the date
   span to search, minimum nights, budget, mix-and-match toggle with a maximum
   airport-to-airport distance, ranking mode, and the scraper controls.
+* **⚙️ Settings** (sidebar expander): tick **Avelo PLUS member** and **Discount Den
+  member** to say which programs you belong to, and set parking $/day and the drive
+  from home (minutes) for each home airport. **Save settings** re-prices every stored
+  fare to what you would pay (no price-drop alert is raised by the change) and
+  refreshes the page; parking and drive feed the "home side" cost and door-to-door ranking.
 * **Header badge**: *Avelo Plus Pricing Active (Free Carry-On & Seat
   Selection Applied)*. Total Getaway Cost is what you pay per leg
   (member fare where a membership applies, public fare otherwise, e.g. Frontier while you are not a member) plus
-  add-ons; Avelo PLUS perks ($0 add-ons) apply to Avelo legs only, and carry-on is added only when a query counts it
-  (the dashboard has no control for that until Phase 4).
+  add-ons; Avelo PLUS perks ($0 add-ons) apply to Avelo legs only, and carry-on is added only when **Count a carry-on
+  bag** is ticked (or a saved rule asks). While you are not a Discount Den member a **💡 Discount Den would save:** pill
+  shows what membership would have saved on your booked Frontier legs and on the best package listed now.
 * **Main panel**: coverage line, a per-route **last scraped** table with age,
   metrics, a **Wildcard weekend** button (a random package under budget,
   weighted towards cheap ones), the ranked package table (with **Deal vs
   Typical** against the route medians and a **Trend** arrow versus the
-  previous scrape), a **Trend & weather** tab (`st.line_chart` of each leg and
+  previous scrape), an **Airline vs airline** tab (for each free window and destination, the best
+  Avelo-only and Frontier-only package side by side, who is cheaper and by how much; with data
+  from one airline only it says so), a **Trend & weather** tab (`st.line_chart` of each leg and
   the total across scraper runs, plus an Open-Meteo outlook for the
-  destination on the trip dates), the fare calendar and the timeline.
+  destination on the trip dates), the fare calendar (one row per airline and route, lowest fare per
+  day) and the timeline. The push topic is never shown on screen; the sidebar only says whether
+  push alerts are on.
 
 ## How the Flexible Getaway optimizer works
 

@@ -1,11 +1,12 @@
 # CLAUDE.md — Avelo Finder
 
-Personal getaway finder for Avelo Airlines nonstops from **Wilmington, DE (ILG)**.
-Scrapes Avelo PLUS member fares (and Frontier fares) into SQLite, builds mix-and-match weekend
+Personal getaway finder for Avelo Airlines and Frontier nonstops from **Wilmington, DE (ILG)**, Philadelphia (PHL)
+and Baltimore (BWI). Scrapes Avelo PLUS member fares and Frontier fares into SQLite, builds mix-and-match weekend
 packages that fit a weekly free window, watches fares nightly, pushes alerts,
 and hands off to Avelo's site for booking. Single user (the owner is an Avelo
 PLUS member). Python 3.13, Streamlit, Playwright, SQLite. Git repo: `main` is the
-baseline, feature work goes on a branch (Phase 1 is on `phase1-multi-home`).
+baseline, feature work goes on a branch (Phase 4 is on `phase4-dashboard`). All four phases of the
+multi-airline spec (`docs/superpowers/specs/2026-10-06-multi-airline-frontier-design.md`) are built.
 
 ## Run / test
 
@@ -18,7 +19,7 @@ Desktop: iCloud "Optimize Mac Storage" evicted ~20k `.venv` files (`ls -lO` show
 ```bash
 cd ~/avelo-finder
 source .venv/bin/activate            # venv already built; playwright chromium installed
-pytest -q                            # tests, no network; AppTest boots the dashboard (376 passed)
+pytest -q                            # tests, no network; AppTest boots the dashboard (449 passed)
 streamlit run app.py                 # dashboard (nothing scrapes on load)
 python launch.py [--detach|--stop]   # start if needed + open browser; ~/Desktop/Avelo Finder.command calls it
 python run_scraper.py --destinations TPA,LAL --start 2026-10-01 --end 2026-10-14   # targeted live scrape
@@ -71,11 +72,13 @@ directory; keep both files. A scratch `AVELO_DB_PATH` for a test run may have an
 | `netutil.py` | urllib with certifi CA bundle (python.org CPython on macOS has no roots) |
 | `run_scraper.py` | CLI (`--airlines`, per-airline `--promo F9=CODE`, `--from-rules` for the nightly job); one run per airline; `--routes` is split per airline when several are requested; `build_command()` is what the dashboard button runs |
 | `mock_data.py` | deterministic synthetic ILG schedule |
-| `app.py` | Streamlit dashboard |
+| `views.py` | pure dashboard view logic, no Streamlit: served destinations per airline and home airport (`served_destinations`, with documented fallbacks while an airline's catalog is empty), labels, scrape plan and its caption (`scrape_estimate`, `describe_plan`: exact, "up to" or "at least"), the mock-run selection, airline comparison, map arcs and view, program meter |
+| `app.py` | Streamlit dashboard: wires widgets to `views.py`, `optimizer` and `database`; sidebar "From & with" (home airports, airlines, return to a different home airport, count a carry-on bag), a destination list that follows them, Settings panel (memberships, parking and drive per home airport), 7 tabs including "Airline vs airline", Discount Den meter, system map and fare calendar split by airline |
 | `launch.py` | one-click launcher (venv re-exec, health-check reuse, detach/stop via `data/streamlit.pid`); `~/Desktop/Avelo Finder.command` calls it |
 | `conftest.py`, `pytest.ini` | refuse to open the owner's database under pytest; pin the rootdir so that guard always loads |
 | `tests/` | pytest; `tests/fixtures/` holds HTML/JSON captured from the live site (Sep 2026) |
 | `docs/superpowers/specs/2026-09-07-getaway-features-design.md` | the 12-feature spec; all 3 phases built |
+| `docs/superpowers/specs/2026-10-06-multi-airline-frontier-design.md` | the multi-airline spec; all 4 phases built (plans in `docs/superpowers/plans/`) |
 
 ## How Avelo's site actually works (learned by probing; don't re-derive)
 
@@ -170,6 +173,27 @@ directory; keep both files. A scratch `AVELO_DB_PATH` for a test run may have an
 - Streamlit ≥1.63: use `width="stretch"` (not `use_container_width`); give
   every `st.plotly_chart` a unique `key`; widgets driven from callbacks use
   `session_state` keys, not `value=`. `tests/test_app.py` uses `AppTest`.
+- Dashboard logic goes in `views.py` as pure functions with unit tests; `app.py` only wires widgets to them.
+  Session-state keys (exact): `home_select` (home airport codes), `airline_select` (airline codes), `open_jaw` (bool),
+  `count_carry_on` (bool), `dest_select` (destination codes). Supporting keys: `dest_offered` (what the current homes and
+  airlines serve; `dest_select` is pruned to it), `dest_kept` (last selection made while something was offered),
+  `select_all` / `region_<name>`, `pending_scrape` (the "This weekend" request, with the homes and airlines chosen at click time),
+  `member_<code>` / `parking_<code>` / `drive_<code>` (Settings).
+- The sidebar defaults reproduce the pre-Phase-4 screen for an owner with only Avelo data: every home airport, every known airline,
+  open-jaw off, carry-on off. A destination is offered when at least one selected airline serves it from at least one selected home
+  airport (route catalog; `views._fallback_pairs` while an airline's catalog is empty). Selecting no airline or no home airport
+  shows a message and keeps the destination selection (it is the state passed through when the only selected airline or home is
+  swapped); destinations the new choice no longer serves drop out of `dest_select`.
+- The scrape button runs exactly what the caption says (`run_scraper.py --airlines ... --origins ...`). The caption counts routes
+  per airline: Frontier's count is "up to N" until its route list has been fetched for those homes and "at least N" while a stale list
+  is refreshing first; `--mock` runs Avelo from the primary home only, and the caption says so. "This weekend" scrapes the
+  destinations the sidebar offers, with the homes and airlines selected when it was clicked.
+- Settings (memberships, parking, drive minutes) are saved through `database.set_membership` / `set_home_cost`; saving re-prices
+  stored fares (no price-drop alert is raised) and clears Streamlit's cached readers and the search cache. Memberships default to
+  Avelo PLUS yes, Frontier Discount Den no. The Discount Den meter (`views.program_meter`) appears while the owner is not a member
+  and says what the program would save on booked legs and on the best listed package; each program's meter counts only its own
+  airline's legs.
+- The private ntfy topic is never rendered; the sidebar only says whether push alerts are on.
 - Package/watch identity is the trip key, never the flight_id row.
 - Every fare delete is scoped to one airline (an Avelo run never deletes or shadows Frontier rows, and vice versa).
 - One scrape run per airline; baselines compare same-airline runs. Watches, rules and bookings are evaluated
@@ -179,8 +203,8 @@ directory; keep both files. A scratch `AVELO_DB_PATH` for a test run may have an
   existing database the column does not exist yet).
 - Packages read every airline in `GetawayQuery.airlines` (default all known); a rule saved without `airlines` is
   Avelo-only, and one without `origins` means the primary home, so old rules behave as before. The fare calendar
-  shows the lowest fare across airlines per route and day (`route_calendar` groups by origin, destination, day);
-  only the packages table's signal badge is keyed by airline.
+  is split by airline in the dashboard (`database.route_calendar(..., by_airline=True)`: one row per airline, origin, destination,
+  day; the default groups across airlines). The packages table's signal badge is keyed by airline too.
 - Alert state is written only after a push is delivered (`alerts.StateWrite` / `apply_writes`), so a failed push is
   retried on the next run; with no push channel (or `AVELO_OFFLINE`) the in-app feed is the delivery.
 - Signals, floors and baselines are per airline: `route_floor` is keyed `(airline, origin, destination)` and `events`
@@ -190,8 +214,9 @@ directory; keep both files. A scratch `AVELO_DB_PATH` for a test run may have an
 - Carry-on fees are estimates in `config.CARRY_ON_FEE`, counted only when a query asks (`count_carry_on`), per leg
   by that leg's airline. Avelo PLUS perks ($0 add-ons) apply to Avelo legs only.
 - Known limits: Frontier's public route page lists about 20 of ~30 destinations per home airport (pass others with
-  `--routes`); the dashboard has no controls yet for airlines, open-jaw, carry-on or memberships (Phase 4), so
-  those are set through saved rules, the `GetawayQuery` defaults and the settings table.
+  `--routes`); carry-on fees are estimates (`config.CARRY_ON_FEE`); bot-challenge detection has never been seen live
+  (see "How Frontier's site works"); Frontier route floors come only from detail/full runs (a calendar-only run never sets
+  one). The sidebar has the airline, home airport, open-jaw and carry-on controls and a Settings panel for memberships.
 - A run's `status` (ok/partial/failed) decides whether it can be a signal baseline.
 - `route_day_seen.basis`: `persist.save_calendar` records `calendar` for an airline whose calendar price is not a
   bookable fare (`Airline.calendar_bookable` False: Frontier, lowest Discount Den total of any routing), everything else
@@ -216,6 +241,16 @@ runs from before the `status` column have NULL status (finished ones still count
 as `ok` baselines, the two that never finished do not). The owner has
 subscribed to the ntfy topic and was asked to save a rule, watch packages, and
 install the nightly job from the sidebar.
+
+## What remains after the four phases
+
+- Frontier's public route page lists only about 20 of ~30 destinations per home airport ("route list page 2" is not fetched),
+  so the rest need `--routes`.
+- Carry-on fees (`AVELO_CARRY_ON_XP` / `AVELO_CARRY_ON_F9`) are estimates, not scraped.
+- `frontier.is_challenge_page` has never matched a real challenge page; a missed one is a plain `ScrapeError`.
+- Frontier route floors are set only by detail/full runs; the calendar-only nightly job never sets one.
+- A live two-airline pass over the dashboard (scrape both airlines into a copy of the database, then look at the screen) is a
+  manual step with the owner; tests never scrape. The AppTest dry run against a copy of the real database passes.
 
 ## Ideas not yet built (from the brainstorm)
 
