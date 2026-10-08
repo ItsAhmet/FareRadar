@@ -17,7 +17,7 @@ def test_env_example_does_not_promise_a_dashboard_carry_on_toggle():
     line = next(l for l in _read(".env.example").splitlines() if "carry-on bag per flight leg" in l)
     assert "toggle" not in line and "Phase 4" in line
     assert "toggle" not in " ".join(l for l in _read("config.py").splitlines() if "carry-on" in l)
-    assert not re.search(r"st\.(sidebar\.)?(toggle|checkbox)\([^)]*carry", _read("app.py"), re.I)
+    # the sidebar has had a "Count a carry-on bag" checkbox since Phase 4; these comments still must not call it a toggle
 
 
 def test_claude_md_calendar_and_events_statements_match_the_code():

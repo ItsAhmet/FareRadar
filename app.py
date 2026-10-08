@@ -21,11 +21,13 @@ import streamlit as st
 
 import config
 import database
+import airlines
 import alerts
 import bookings
 import places
 import runlock
 import scheduler
+import views
 import weather
 from handoff import handoff_command
 from planner import plan_season
@@ -54,7 +56,7 @@ st.set_page_config(page_title="Avelo Getaways", page_icon="✈️", layout="wide
 
 PRICE_SCALE = ["#e8f1fb", "#b9d3f0", "#84b0e3", "#4f8bd3", "#2a63b8", "#153f8a"]  # one hue, light = cheap
 ACCENT = "#2a63b8"
-ALL_CODES = list(config.DESTINATIONS)
+ALL_CODES = list(config.ALL_DESTINATIONS)  # every airport either airline can reach; the offered subset is computed per run
 
 
 # --------------------------------------------------------------------------- #
@@ -70,8 +72,8 @@ def _db_version() -> float:
 
 
 @st.cache_data(show_spinner=False)
-def load_selection_stats(destinations: tuple[str, ...], start: date, end: date, _version: float) -> dict:
-    return database.selection_stats(config.HOME_CODES, list(destinations), start, end)
+def load_selection_stats(homes: tuple[str, ...], destinations: tuple[str, ...], start: date, end: date, _version: float) -> dict:
+    return database.selection_stats(list(homes), list(destinations), start, end)
 
 
 @st.cache_data(show_spinner=False)
@@ -80,8 +82,14 @@ def load_calendar(start: date, end: date, _version: float) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False)
-def load_freshness(destinations: tuple[str, ...], _version: float) -> pd.DataFrame:
-    return pd.DataFrame(database.route_freshness(config.HOME_CODES, list(destinations)))
+def load_freshness(homes: tuple[str, ...], destinations: tuple[str, ...], _version: float) -> pd.DataFrame:
+    return pd.DataFrame(database.route_freshness(list(homes), list(destinations)))
+
+
+@st.cache_data(show_spinner=False)
+def load_catalog(homes: tuple[str, ...], _version: float) -> dict[str, list[tuple[str, str]]]:
+    """Airline → directional routes it lists from these home airports (empty until a scrape fills the catalog)."""
+    return {code: database.catalog_routes(code, origins=list(homes)) for code in config.KNOWN_AIRLINES}
 
 
 @st.cache_data(show_spinner=False)
@@ -170,55 +178,77 @@ def run_search(query: GetawayQuery) -> list[Itinerary]:
 # --------------------------------------------------------------------------- #
 
 
+def trip_source_picker() -> tuple[list[str], list[str]]:
+    """Which home airports to leave from and whose fares to use."""
+    st.sidebar.subheader("From & with")
+    if "home_select" not in st.session_state:
+        st.session_state.home_select = list(config.HOME_CODES)
+    if "airline_select" not in st.session_state:
+        st.session_state.airline_select = sorted(config.KNOWN_AIRLINES)
+    homes = st.sidebar.multiselect("Home airports", options=list(config.HOME_CODES), key="home_select",
+                                   format_func=lambda c: config.HOME_AIRPORTS[c].label)
+    airline_codes = st.sidebar.multiselect("Airlines", options=sorted(config.KNOWN_AIRLINES), key="airline_select",
+                                           format_func=lambda c: airlines.get(c).name)
+    st.sidebar.checkbox("Return to a different home airport", key="open_jaw",
+                        help="Off: every trip returns to the airport it left from (where your car is). "
+                             "On: also show trips that come back into another home airport.",
+                        disabled=len(homes) < 2)
+    st.sidebar.checkbox("Count a carry-on bag", key="count_carry_on",
+                        help=f"Adds each airline's carry-on fee per flight "
+                             f"({', '.join(f'{airlines.get(c).name} ${config.CARRY_ON_FEE[c]:.0f}' for c in sorted(config.KNOWN_AIRLINES))}; estimates you can change in .env).")
+    if not homes:
+        st.sidebar.warning("Pick at least one home airport.")
+    if not airline_codes:
+        st.sidebar.warning("Pick at least one airline.")
+    return list(homes), list(airline_codes)
+
+
+def _offered() -> list[str]:
+    """Destinations the current homes and airlines serve, in ALL_CODES order (set by destination_picker)."""
+    return st.session_state.get("dest_offered", list(ALL_CODES))
+
+
 def _init_selection_state() -> None:
     if "dest_select" not in st.session_state:
-        st.session_state.dest_select = list(ALL_CODES)
-        st.session_state.select_all = True
-        for region in config.REGIONS:
-            st.session_state[f"region_{region}"] = True
+        st.session_state.dest_select = [c for c in _offered() if c in config.DESTINATIONS] or list(_offered())
+    offered = set(_offered())
+    st.session_state.dest_select = [c for c in st.session_state.dest_select if c in offered]   # never keep an unoffered code
+    for region in config.REGIONS:
+        codes = set(config.region_codes(region)) & offered
+        st.session_state[f"region_{region}"] = bool(codes) and codes <= set(st.session_state.dest_select)
+    st.session_state.select_all = bool(offered) and set(st.session_state.dest_select) == offered
 
 
 def _on_select_all() -> None:
-    on = st.session_state.select_all
-    st.session_state.dest_select = list(ALL_CODES) if on else []
-    for region in config.REGIONS:
-        st.session_state[f"region_{region}"] = on
+    st.session_state.dest_select = list(_offered()) if st.session_state.select_all else []
 
 
 def _on_region(region: str) -> None:
     current = set(st.session_state.dest_select)
-    codes = set(config.region_codes(region))
+    codes = set(config.region_codes(region)) & set(_offered())
     current = current | codes if st.session_state[f"region_{region}"] else current - codes
-    st.session_state.dest_select = [c for c in ALL_CODES if c in current]
-    st.session_state.select_all = len(current) == len(ALL_CODES)
+    st.session_state.dest_select = [c for c in _offered() if c in current]
 
 
 def _on_airports() -> None:
-    current = set(st.session_state.dest_select)
-    for region in config.REGIONS:
-        st.session_state[f"region_{region}"] = set(config.region_codes(region)) <= current
-    st.session_state.select_all = len(current) == len(ALL_CODES)
+    pass  # region and select-all boxes are recomputed from dest_select on the next run
 
 
-def destination_picker() -> list[str]:
+def destination_picker(served: dict[str, list[str]]) -> list[str]:
+    st.session_state.dest_offered = [c for c in ALL_CODES if c in served]
     _init_selection_state()
     st.sidebar.subheader("Destinations")
+    if not served:
+        st.sidebar.caption("No destinations for this choice of home airports and airlines.")
+        return []
     st.sidebar.checkbox("Select all routes", key="select_all", on_change=_on_select_all)
     cols = st.sidebar.columns(2)
-    for i, region in enumerate(config.REGIONS):
-        cols[i % 2].checkbox(
-            f"{region} ({len(config.region_codes(region))})",
-            key=f"region_{region}",
-            on_change=_on_region,
-            args=(region,),
-        )
-    st.sidebar.multiselect(
-        "Airports",
-        options=ALL_CODES,
-        key="dest_select",
-        on_change=_on_airports,
-        format_func=lambda c: config.DESTINATIONS[c].label,
-    )
+    regions = [r for r in config.REGIONS if set(config.region_codes(r)) & set(served)]
+    for i, region in enumerate(regions):
+        n = len(set(config.region_codes(region)) & set(served))
+        cols[i % 2].checkbox(f"{region} ({n})", key=f"region_{region}", on_change=_on_region, args=(region,))
+    st.sidebar.multiselect("Airports", options=st.session_state.dest_offered, key="dest_select", on_change=_on_airports,
+                           format_func=lambda c: views.destination_label(c, served.get(c, [])))
     return list(st.session_state.dest_select)
 
 
@@ -246,22 +276,19 @@ def availability_picker() -> tuple[Availability, Availability | None, bool]:
     return mine, partner, holiday_extend
 
 
-def sidebar() -> tuple[GetawayQuery | None, list[str], tuple[date, date], str, dict]:
-    st.sidebar.title("✈️ Avelo Getaways")
-    st.sidebar.caption(f"Nonstop on Avelo from {' · '.join(config.HOME_CODES)}")
+def sidebar() -> tuple[GetawayQuery | None, list[str], tuple[date, date], str, dict, list[str], list[str]]:
+    st.sidebar.title("✈️ Getaway Finder")
 
     today = date.today()
     if st.sidebar.button("⚡ This weekend", help="Next 5 days, every destination, scrape now", width="stretch"):
-        _init_selection_state()
-        st.session_state.dest_select = list(ALL_CODES)
-        st.session_state.select_all = True
-        for region in config.REGIONS:
-            st.session_state[f"region_{region}"] = True
+        st.session_state.dest_select = list(_offered())  # the boxes follow on the rerun
         st.session_state.span = (today, today + timedelta(days=5))
-        st.session_state.pending_scrape = {"destinations": list(ALL_CODES), "start": today, "end": today + timedelta(days=5)}
+        st.session_state.pending_scrape = {"destinations": list(_offered()), "start": today, "end": today + timedelta(days=5)}
         st.rerun()
 
-    destinations = destination_picker()
+    homes, airline_codes = trip_source_picker()
+    served = views.served_destinations(airline_codes, homes, load_catalog(tuple(homes), _db_version()))
+    destinations = destination_picker(served)
     availability, partner, holiday_extend = availability_picker()
 
     st.sidebar.subheader("Search span & limits")
@@ -304,20 +331,26 @@ def sidebar() -> tuple[GetawayQuery | None, list[str], tuple[date, date], str, d
     modes = ["Cheapest package", "Best window fit", "Sunniest under budget"] + (["Door-to-door"] if place else [])
     sort_mode = st.sidebar.radio("Rank by", modes, horizontal=True)
 
+    allow_open_jaw = bool(st.session_state.open_jaw) and len(homes) > 1
+    count_carry_on = bool(st.session_state.count_carry_on)
     st.session_state.filters = {
         "destinations": destinations, "availability": availability, "min_nights": min_nights,
         "max_budget": float(budget), "allow_mix": allow_mix, "max_pair_miles": float(max_pair),
         "span_days": (span_end - date.today()).days, "holiday_extend": holiday_extend,
-        "origins": list(config.HOME_CODES), "allow_open_jaw": False, "partner": partner,
+        "origins": homes, "airlines": airline_codes, "allow_open_jaw": allow_open_jaw,
+        "count_carry_on": count_carry_on, "partner": partner,
     }
     st.session_state.place_mode = {"place": place, "drives": drives, "value": float(drive_value)}
     windows = availability.windows(span_start, span_end, holiday_extend=holiday_extend)
     if partner is not None:
         windows = intersect_windows(windows, partner.windows(span_start, span_end, holiday_extend=holiday_extend))
     query = None
-    if destinations and windows:
+    if homes and airline_codes and destinations and windows:
         query = GetawayQuery(
-            origins=list(config.HOME_CODES),
+            origins=homes,
+            airlines=set(airline_codes),
+            allow_open_jaw=allow_open_jaw,
+            count_carry_on=count_carry_on,
             destinations=set(destinations),
             windows=windows,
             min_nights=min_nights,
@@ -331,7 +364,7 @@ def sidebar() -> tuple[GetawayQuery | None, list[str], tuple[date, date], str, d
     st.sidebar.divider()
     rule_panel()
     scheduler_panel()
-    return query, destinations, (span_start, span_end), sort_mode, scrape_opts
+    return query, destinations, (span_start, span_end), sort_mode, scrape_opts, homes, airline_codes
 
 
 def rule_panel() -> None:
@@ -344,7 +377,7 @@ def rule_panel() -> None:
                 f["destinations"], f["availability"], f["min_nights"], f["max_budget"], f["allow_mix"],
                 f["max_pair_miles"], max(f["span_days"], 7), holiday_extend=f.get("holiday_extend", False),
                 origins=f.get("origins"), allow_open_jaw=f.get("allow_open_jaw", False),
-                airlines=sorted(config.KNOWN_AIRLINES), partner=f.get("partner"), count_carry_on=False,
+                airlines=f.get("airlines"), partner=f.get("partner"), count_carry_on=f.get("count_carry_on", False),
             )
             database.add_watch("rule", label.strip(), payload)
             st.success(f"Saved rule '{label.strip()}'. You'll be alerted when new packages match.")
@@ -599,8 +632,8 @@ def member_badge() -> None:
     )
 
 
-def freshness_panel(destinations: list[str], version: float) -> None:
-    df = load_freshness(tuple(destinations), version)
+def freshness_panel(homes: list[str], destinations: list[str], version: float) -> None:
+    df = load_freshness(tuple(homes), tuple(destinations), version)
     with st.expander("Last scraped per route", expanded=False):
         if df.empty:
             st.write("No routes scraped yet for this selection.")
@@ -908,13 +941,13 @@ def results_table(ranked: list[Itinerary], version: float = 0.0) -> None:
     st.download_button("Download CSV", df.to_csv(index=False).encode(), "avelo_getaways.csv", "text/csv")
 
 
-def calendar_heatmap(cal: pd.DataFrame, destinations: list[str], span: tuple[date, date]) -> None:
+def calendar_heatmap(cal: pd.DataFrame, homes: list[str], destinations: list[str], span: tuple[date, date]) -> None:
     """Route × day grid of the lowest fare. Empty cell = no flight that day."""
     if cal.empty:
         st.info("No fares in this span to draw a calendar for.")
         return
-    out = cal[cal.origin.isin(config.HOME_CODES) & cal.destination.isin(destinations)]
-    back = cal[cal.destination.isin(config.HOME_CODES) & cal.origin.isin(destinations)]
+    out = cal[cal.origin.isin(homes) & cal.destination.isin(destinations)]
+    back = cal[cal.destination.isin(homes) & cal.origin.isin(destinations)]
     sub = pd.concat([out, back])
     if sub.empty:
         st.info("No fares for the selected destinations in this span.")
@@ -987,7 +1020,7 @@ def main() -> None:
     if not st.session_state.get("maintained") and not runlock.running_pid():
         database.maintenance()  # drop departed flights, prune old history (a running scrape does its own)
         st.session_state.maintained = True
-    query, destinations, span, sort_mode, _ = sidebar()
+    query, destinations, span, sort_mode, _, homes, airline_codes = sidebar()
 
     running = st.session_state.get("scrape_proc") is not None
 
@@ -999,14 +1032,17 @@ def main() -> None:
     version = _db_version()
 
     unread = database.unread_event_count()
-    st.title("Flexible Getaways from " + " / ".join(config.HOME_CODES) + (f"  🔔 {unread}" if unread else ""))
+    st.title("Flexible Getaways from " + (" / ".join(homes) or "—") + (f"  🔔 {unread}" if unread else ""))
     member_badge()
     system_map(destinations)
 
-    coverage = load_selection_stats(tuple(destinations), span[0], span[1], version)
+    if not (homes and airline_codes):
+        st.info("Pick at least one home airport and one airline in the sidebar.")
+        return
+    coverage = load_selection_stats(tuple(homes), tuple(destinations), span[0], span[1], version)
     coverage_line(coverage, destinations, span)
     if destinations:
-        freshness_panel(destinations, version)
+        freshness_panel(homes, destinations, version)
     if query is None:
         if destinations:
             st.info("Your free window doesn't fit inside the search span. Widen the span or shorten the window.")
@@ -1058,7 +1094,7 @@ def main() -> None:
         else:
             st.info("Nothing to inspect yet.")
     with tab_calendar:
-        calendar_heatmap(load_calendar(span[0], span[1], version), destinations, span)
+        calendar_heatmap(load_calendar(span[0], span[1], version), homes, destinations, span)
     with tab_timeline:
         itinerary_timeline(ranked, key="ranked_timeline")
 

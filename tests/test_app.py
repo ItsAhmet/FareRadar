@@ -13,6 +13,16 @@ from mock_data import generate_mock_flights
 APP = Path(__file__).resolve().parent.parent / "app.py"
 
 
+def _airports(at):
+    """The destination multiselect (the sidebar also has home-airport and airline multiselects)."""
+    return next(m for m in at.multiselect if m.label == "Airports")
+
+
+def _codes(multiselect):
+    """Airport codes a multiselect offers: AppTest reports options as displayed ('DEN · Denver · Frontier')."""
+    return [o.split(" · ")[0] for o in multiselect.options]
+
+
 @pytest.fixture
 def mock_db(tmp_path, monkeypatch):
     path = tmp_path / "flights.db"
@@ -39,7 +49,7 @@ def test_dashboard_renders_without_exceptions(mock_db):
     assert len(at.dataframe) >= 1
     assert any("Execute Target Scrape" in b.label for b in at.button)
     assert any("Wildcard weekend" in b.label for b in at.button)
-    assert at.multiselect[0].value == list(config.DESTINATIONS)  # all routes selected by default
+    assert _airports(at).value == list(config.DESTINATIONS)  # every Avelo route selected by default
     assert any(config.MEMBER_BADGE in m.value for m in at.markdown), "Avelo Plus badge missing"
     assert any("Promo Code" in t.label for t in at.text_input)
     assert any("Inspect a package" in sb.label for sb in at.selectbox)  # trend & weather inspector
@@ -79,18 +89,26 @@ def test_wildcard_button_shows_a_package(mock_db):
 
 def test_region_checkbox_drives_destination_selection(mock_db):
     at = AppTest.from_file(str(APP), default_timeout=90).run()
-    florida = next(c for c in at.checkbox if c.label.startswith("Florida"))
-    florida.uncheck().run()
+    florida = lambda: next(c for c in at.checkbox if c.label.startswith("Florida"))
+    assert florida().value is False                     # Frontier's Florida airports are offered but not preselected
+    florida().check().run()
     assert not at.exception
-    assert not (set(at.multiselect[0].value) & set(config.region_codes("Florida")))
+    assert {"TPA", "MIA"} <= set(_airports(at).value)
+    florida().uncheck().run()
+    assert not at.exception
+    assert not (set(_airports(at).value) & set(config.region_codes("Florida")))
     assert next(c for c in at.checkbox if c.label == "Select all routes").value is False
 
 
 def test_dashboard_handles_empty_selection(mock_db):
     at = AppTest.from_file(str(APP), default_timeout=90).run()
-    next(c for c in at.checkbox if c.label == "Select all routes").uncheck().run()
+    select_all = lambda: next(c for c in at.checkbox if c.label == "Select all routes")
+    select_all().check().run()
     assert not at.exception
-    assert at.multiselect[0].value == []
+    assert _airports(at).value == _codes(_airports(at))
+    select_all().uncheck().run()
+    assert not at.exception
+    assert _airports(at).value == []
     assert any("Pick at least one destination" in i.value for i in at.info)
 
 
@@ -139,7 +157,7 @@ def test_dashboard_labels_follow_the_configured_home_airports(mock_db, monkeypat
     assert not at.exception, at.exception
 
     assert at.title[0].value == "Flexible Getaways from PHL / ILG / BWI"
-    assert at.sidebar.title[0].value == "✈️ Avelo Getaways"
+    assert at.sidebar.title[0].value == "✈️ Getaway Finder"
     markdown = " ".join(m.value for m in at.markdown)
     assert "PHL hub" in markdown and "ILG hub" not in markdown
 
@@ -150,7 +168,7 @@ def test_clearing_the_place_drops_cached_drive_times(mock_db):
     the place (destinations unchanged) left stale drive minutes and $/hour on them."""
     database.set_place("Siesta Key, FL", "Siesta Key, Florida, US", 27.2673, -82.5459)
     at = AppTest.from_file(str(APP), default_timeout=90).run()
-    at.multiselect[0].set_value(["TPA"]).run()  # same airport set with and without the place
+    _airports(at).set_value(["TPA"]).run()  # same airport set with and without the place
     next(t for t in at.text_input if t.label == "Place (optional)").set_value("Siesta Key, FL").run()
     assert not at.exception, at.exception
     df = next(d.value for d in at.dataframe if "Door-to-door" in d.value.columns)
@@ -378,3 +396,44 @@ def test_dashboard_shows_frontier_packages_with_their_airline(mock_db, monkeypat
     frontier_rows = tables[0][tables[0]["Airlines"] == "Frontier"]
     assert (frontier_rows["Program would save"] > 0).all()
     assert any("airline" in df.value.columns and (df.value["airline"] == "F9").any() for df in at.dataframe)   # freshness table
+
+
+def test_default_screen_matches_avelo_only_data(mock_db):
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    assert not at.exception, at.exception
+    assert next(m for m in at.multiselect if m.label == "Home airports").value == list(config.HOME_CODES)
+    assert next(m for m in at.multiselect if m.label == "Airlines").value == sorted(config.KNOWN_AIRLINES)
+    assert at.metric[2].value != "0"                                    # packages still found
+    dest = next(m for m in at.multiselect if m.label == "Airports")
+    assert set(config.DESTINATIONS) <= set(_codes(dest)) and "DEN" in _codes(dest)     # Frontier airports offered too
+    assert "DEN · Denver · Frontier" in dest.options and "TPA · Tampa · Avelo, Frontier" in dest.options
+    assert any(c.label == "Return to a different home airport" and c.value is False for c in at.checkbox)
+    assert any(c.label == "Count a carry-on bag" and c.value is False for c in at.checkbox)
+
+
+def test_narrowing_airlines_and_homes_prunes_destinations_without_errors(mock_db):
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    next(m for m in at.multiselect if m.label == "Airlines").set_value(["XP"]).run()
+    assert not at.exception, at.exception
+    dest = next(m for m in at.multiselect if m.label == "Airports")
+    assert "DEN" not in _codes(dest) and "DEN" not in dest.value and "TPA" in dest.value
+    next(m for m in at.multiselect if m.label == "Airlines").set_value([]).run()
+    assert not at.exception, at.exception
+    assert any("Pick at least one airline" in w.value for w in at.warning)
+    next(m for m in at.multiselect if m.label == "Airlines").set_value(["XP", "F9"]).run()
+    next(m for m in at.multiselect if m.label == "Home airports").set_value([]).run()
+    assert not at.exception and any("Pick at least one home airport" in w.value for w in at.warning)
+    assert any("Pick at least one home airport and one airline" in i.value for i in at.info)   # main page says why it is empty
+    assert not any("Pick at least one destination" in i.value for i in at.info)
+
+
+def test_saved_rule_carries_the_sidebar_selection(mock_db):
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    next(m for m in at.multiselect if m.label == "Home airports").set_value(["ILG"]).run()
+    next(m for m in at.multiselect if m.label == "Airlines").set_value(["XP"]).run()
+    next(c for c in at.checkbox if c.label == "Count a carry-on bag").set_value(True).run()
+    next(t for t in at.text_input if t.label == "Rule name").set_value("Avelo from ILG").run()
+    next(b for b in at.button if b.label == "Save rule").click().run()
+    assert not at.exception, at.exception
+    payload = database.list_watches("rule")[0]["payload"]
+    assert (payload["origins"], payload["airlines"], payload["count_carry_on"], payload["allow_open_jaw"]) == (["ILG"], ["XP"], True, False)
