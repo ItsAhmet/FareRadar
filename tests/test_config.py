@@ -8,9 +8,18 @@ import config
 
 def test_all_sixteen_ilg_destinations_present_and_grouped():
     assert set(config.DESTINATIONS) == {"LAL", "SRQ", "TPA", "MCO", "RSW", "DAB", "FLL", "PBI", "MYR", "ILM", "SAV", "CHS", "GSP", "RDU", "BNA", "SJU"}
-    assert config.REGIONS == ["Florida", "Carolinas & Georgia", "Tennessee", "Caribbean"]
+    assert config.REGIONS[:4] == ["Florida", "Carolinas & Georgia", "Tennessee", "Caribbean"]
     assert config.region_codes("Tennessee") == ["BNA"]
     assert set(config.REGION_COLORS) == set(config.REGIONS)
+
+
+def test_destination_universe_covers_both_airlines():
+    assert set(config.ALL_DESTINATIONS) == set(config.DESTINATIONS) | set(config.FRONTIER_AIRPORTS)
+    assert config.REGIONS[:4] == ["Florida", "Carolinas & Georgia", "Tennessee", "Caribbean"]
+    assert set(config.REGION_COLORS) == set(config.REGIONS) == {a.region for a in config.ALL_DESTINATIONS.values()}
+    assert "DEN" in config.region_codes("West") and "MIA" in config.region_codes("Florida")
+    assert set(config.FRONTIER_SHARED_DESTINATIONS) <= set(config.DESTINATIONS)
+    assert config.parse_airline_codes("XP,F9") == ["XP", "F9"]
 
 
 def test_distances_are_sane():

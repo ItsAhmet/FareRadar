@@ -108,20 +108,22 @@ DESTINATIONS: dict[str, Airport] = {
     )
 }
 
-REGIONS: list[str] = list(dict.fromkeys(a.region for a in DESTINATIONS.values()))
-
 # Fixed categorical colours per region (Okabe–Ito, colour-blind safe), RGB.
 REGION_COLORS: dict[str, tuple[int, int, int]] = {
     "Florida": (230, 159, 0),
     "Carolinas & Georgia": (0, 158, 115),
     "Tennessee": (204, 121, 167),
     "Caribbean": (0, 114, 178),
+    "Texas & Gulf": (213, 94, 0),
+    "West": (86, 180, 233),
+    "Midwest": (240, 228, 66),
+    "Mexico & Central America": (120, 120, 120),
 }
 HUB_COLOR: tuple[int, int, int] = (31, 41, 55)
 INACTIVE_COLOR: tuple[int, int, int] = (176, 183, 195)
 
-# Airports only Frontier flies from the home airports. Kept apart from DESTINATIONS (Avelo's list, which the
-# dashboard shows) until the dashboard gains airline filters in Phase 4.
+# Airports only Frontier flies from the home airports. Kept apart from DESTINATIONS (Avelo's list); ALL_DESTINATIONS
+# is the union the dashboard offers.
 FRONTIER_AIRPORTS: dict[str, Airport] = {
     a.code: a
     for a in (
@@ -149,7 +151,15 @@ FRONTIER_AIRPORTS: dict[str, Airport] = {
     )
 }
 
-ALL_AIRPORTS: dict[str, Airport] = {**HOME_AIRPORT_INFO, **DESTINATIONS, **FRONTIER_AIRPORTS}
+ALL_DESTINATIONS: dict[str, Airport] = {**DESTINATIONS, **FRONTIER_AIRPORTS}
+# Avelo destinations Frontier also sells from PHL/BWI. Only a fallback for the dashboard's destination list
+# when the route catalog has not been filled yet; the catalog is the truth once it has.
+FRONTIER_SHARED_DESTINATIONS: tuple[str, ...] = ("MCO", "TPA", "RSW", "SJU", "BNA", "RDU", "PBI")
+
+# Avelo's four regions first, in today's order, then the regions only Frontier adds.
+REGIONS: list[str] = list(dict.fromkeys(a.region for a in ALL_DESTINATIONS.values()))
+
+ALL_AIRPORTS: dict[str, Airport] = {**HOME_AIRPORT_INFO, **ALL_DESTINATIONS}
 
 # --------------------------------------------------------------------------- #
 # Airlines
@@ -173,10 +183,9 @@ def parse_airline_codes(raw: str) -> list[str]:
     return known or ["XP"]
 
 
-# Which airlines a scrape covers when --airlines is not given. Avelo only by default: the dashboard shows Frontier
-# fares, but scraping Frontier (also nightly) is opt-in with AVELO_AIRLINES=XP,F9.
-# It also caps --from-rules (the nightly job): a saved rule or watch never adds an airline that is not listed here.
-ACTIVE_AIRLINES: list[str] = parse_airline_codes(os.getenv("AVELO_AIRLINES", "XP"))
+# Which airlines a scrape covers when --airlines is not given, and the cap for the nightly job (--from-rules): a
+# saved rule or watch never adds an airline that is not listed here.
+ACTIVE_AIRLINES: list[str] = parse_airline_codes(os.getenv("AVELO_AIRLINES", "XP,F9"))
 
 FRONTIER_HOME_URL = "https://www.flyfrontier.com/"
 FRONTIER_SELECT_URL = "https://booking.flyfrontier.com/Flight/InternalSelect"
@@ -190,7 +199,7 @@ FRONTIER_PROBE_DAYS: int = 7
 
 
 def region_codes(region: str) -> list[str]:
-    return [c for c, a in DESTINATIONS.items() if a.region == region]
+    return [c for c, a in ALL_DESTINATIONS.items() if a.region == region]
 
 
 def airport_name(code: str) -> str:

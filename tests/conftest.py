@@ -8,6 +8,8 @@ from pathlib import Path
 # must be an environment-level pin: monkeypatching config.PRIMARY_HOME later would
 # not reach them. load_dotenv() never overrides a variable that is already set.
 os.environ["AVELO_HOME_AIRPORTS"] = "ILG,PHL,BWI"
+# Existing tests were written for an Avelo-only default; tests that need Frontier set config.ACTIVE_AIRLINES themselves.
+os.environ["AVELO_AIRLINES"] = "XP"
 
 # Make the flat project modules importable when pytest runs from anywhere.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
