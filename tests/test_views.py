@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 
@@ -99,3 +99,45 @@ def test_program_meter_ignores_the_other_airlines_saving_in_a_mixed_package():
     only_f9 = build_itineraries([leg("F9", "PHL", "MCO", 8, 9, 60, den=50)], [leg("F9", "MCO", "PHL", 11, 16, 50)],
                                 GetawayQuery({"MCO"}, [WINDOW], origins=["PHL"]))
     assert views.program_meter(xp_only, only_f9) is None
+
+
+def test_scrape_estimate_words_only_real_estimates_as_estimates():
+    est = lambda *a, **k: views.scrape_estimate(*a, **k)["F9"]
+    # ILG has no Frontier route page: a scrape visits nothing, and that is a fact, not an estimate
+    assert est(["F9"], ["ILG"], ["TPA", "MCO"], {"F9": []}) == views.PlanEntry("F9", 0)
+    assert views.describe_plan(views.scrape_estimate(["F9", "XP"], ["ILG"], ["TPA", "MCO"], {"F9": [], "XP": []})) == "Avelo 4 · Frontier 0"
+    assert est(["F9"], [], ["TPA"], {"F9": []}) == views.PlanEntry("F9", 0)                      # no homes selected
+    assert est(["F9"], ["PHL"], [], {"F9": []}) == views.PlanEntry("F9", 0)                      # nothing wanted: 0, not "up to 0"
+    # a page home, no rows yet: the ceiling counts every wanted destination, even ones outside the fallback list
+    avelo_only = [d for d in config.DESTINATIONS if d not in config.FRONTIER_SHARED_DESTINATIONS and d not in config.FRONTIER_AIRPORTS]
+    assert est(["F9"], ["PHL", "BWI"], avelo_only[:3], {"F9": []}) == views.PlanEntry("F9", 12, "up_to")
+    # rows for the selected homes, none of them stale: exact
+    assert est(["F9"], ["PHL"], ["MCO"], CATALOG) == views.PlanEntry("F9", 2)
+    # a scrape re-reads a missing or old route page first and can only add routes
+    assert est(["F9"], ["PHL", "BWI"], ["MCO"], CATALOG, refreshing=["BWI"]) == views.PlanEntry("F9", 2, "at_least")
+    assert est(["F9"], ["PHL"], ["MCO"], CATALOG, refreshing=["BWI"]).bound == "exact"          # BWI is not selected
+
+
+def test_scrape_plan_counts_one_direction_catalog_routes_once():
+    assert views.scrape_plan(["F9"], ["PHL"], ["MCO"], {"F9": [("PHL", "MCO")]}) == {"F9": 1}
+
+
+def test_describe_plan_wording():
+    plan = {"XP": views.PlanEntry("XP", 8), "F9": views.PlanEntry("F9", 4, "up_to")}
+    assert views.describe_plan(plan) == "Avelo 8 · Frontier up to 4 (route list not fetched yet)"
+    plan["F9"] = views.PlanEntry("F9", 4, "at_least")
+    assert views.describe_plan(plan) == "Avelo 8 · Frontier at least 4 (route list refreshes first)"
+    assert views.describe_plan({}) == ""
+
+
+def test_stale_frontier_homes_are_the_ones_a_scrape_rereads():
+    now = datetime(2026, 10, 20)
+    seen = {"PHL": now - timedelta(days=2), "BWI": now - timedelta(days=config.CATALOG_REFRESH_DAYS + 1)}
+    assert views.stale_frontier_homes(["ILG", "PHL", "BWI"], seen.get, now) == ["BWI"]     # ILG has no page; PHL is fresh
+    assert views.stale_frontier_homes(["PHL"], lambda h: None, now) == ["PHL"]             # never listed
+
+
+def test_mock_selection_is_avelo_from_the_primary_home_only():
+    assert views.mock_selection(["ILG", "PHL"], ["F9", "XP"]) == ([config.PRIMARY_HOME], ["XP"])
+    assert views.mock_selection(["PHL"], ["F9"]) == ([], ["XP"])
+    assert views.mock_selection(["ILG"], []) == (["ILG"], [])

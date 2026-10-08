@@ -191,6 +191,7 @@ FRONTIER_HOME_URL = "https://www.flyfrontier.com/"
 FRONTIER_SELECT_URL = "https://booking.flyfrontier.com/Flight/InternalSelect"
 FRONTIER_CALENDAR_ENDPOINT = "GetLowFareCalendarAvailability"  # POSTed by the calendar view
 FRONTIER_ROUTES_URL = "https://flights.flyfrontier.com/en/flights-from-{slug}"
+CATALOG_REFRESH_DAYS = 7  # a scrape re-reads a Frontier route page whose listing is older than this
 FRONTIER_ROUTE_PAGES: dict[str, str] = {"PHL": "philadelphia", "BWI": "baltimore"}  # home airport → page slug
 FRONTIER_SITE_CODES: dict[str, str] = {"PBI": "DJT"}  # app code → the code Frontier's site uses
 # Day searches used to learn whether a route has nonstops: one per weekday, because schedules repeat weekly and

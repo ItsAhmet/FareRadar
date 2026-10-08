@@ -506,26 +506,35 @@ def scraper_panel(destinations: list[str], start: date, end: date, homes: list[s
     ).strip().upper()
     st.session_state.promo_code_value = promo
     headful = st.sidebar.checkbox("Show browser window", value=False)
-    plan = views.scrape_plan(airline_codes, homes, destinations, catalog)
-    days = (end - start).days + 1
-    per_airline = " · ".join(
-        f"{airlines.get(code).name} {n}" if code != "F9" or catalog.get(code)
-        else f"{airlines.get(code).name} up to {n} (route list not fetched yet)"
-        for code, n in sorted(plan.items(), reverse=True)
+    mock = source.startswith("Mock")
+    run_homes, run_airlines = views.mock_selection(homes, airline_codes) if mock else (list(homes), list(airline_codes))
+    plan = views.scrape_estimate(
+        run_airlines, run_homes, destinations, catalog,
+        refreshing=views.stale_frontier_homes(run_homes, lambda h: database.catalog_checked("F9", h))
     )
-    st.sidebar.caption(f"Target: {sum(plan.values())} routes × {days} days · {per_airline or 'nothing selected'}"
+    days = (end - start).days + 1
+    st.sidebar.caption(f"Target: {sum(e.routes for e in plan.values())} routes × {days} days · "
+                       f"{views.describe_plan(plan) or 'nothing selected'}"
+                       + (f" · mock data ({', '.join(run_homes)} only)" if mock and run_homes else "")
                        + (f" · promo {promo}" if promo else ""))
+    if mock and homes and not run_homes:
+        st.sidebar.caption(f"Mock data only flies {config.PRIMARY_HOME}; select it to generate fares.")
 
     running = st.session_state.get("scrape_proc") is not None
     pending = st.session_state.pop("pending_scrape", None) if not running else None
-    if pending and not (pending["destinations"] and pending.get("homes") and pending.get("airlines")):
-        pending = None  # never launch with an empty list: run_scraper reads empty destinations as every route
+    launch_homes, launch_airlines = run_homes, run_airlines
+    if pending:
+        launch_homes, launch_airlines = (   # what was selected when the button was clicked
+            views.mock_selection(pending.get("homes") or [], pending.get("airlines") or []) if mock
+            else (list(pending.get("homes") or []), list(pending.get("airlines") or []))
+        )
+        if not (pending["destinations"] and launch_homes and launch_airlines):
+            pending = None  # never launch with an empty list: run_scraper reads empty destinations as every route
     if pending:
         destinations, start, end = pending["destinations"], pending["start"], pending["end"]
-        homes, airline_codes = pending["homes"], pending["airlines"]   # what was selected when the button was clicked
     if pending or st.sidebar.button(
         "🎯 Execute Target Scrape", type="primary", width="stretch",
-        disabled=not destinations or not homes or not airline_codes or running,
+        disabled=not destinations or not run_homes or not run_airlines or running,
     ):
         busy = runlock.running_pid()
         if busy:  # the nightly job or a CLI scrape: don't spawn one that would exit 3
@@ -535,8 +544,8 @@ def scraper_panel(destinations: list[str], start: date, end: date, homes: list[s
             st.rerun()
         database.maintenance()
         cmd = build_command(
-            destinations, start, end, mode=depth, mock=source.startswith("Mock"), headful=headful, promo=promo or None,
-            origins=list(homes), airlines=sorted(airline_codes),
+            destinations, start, end, mode=depth, mock=mock, headful=headful, promo=promo or None,
+            origins=list(launch_homes), airlines=sorted(launch_airlines),
         )
         config.SCRAPE_LOG.parent.mkdir(parents=True, exist_ok=True)
         log_file = open(config.SCRAPE_LOG, "w")

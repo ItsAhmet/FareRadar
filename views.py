@@ -5,7 +5,9 @@ home airports and packages beyond `optimizer`/`database` is decided here.
 """
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 import pandas as pd
 
@@ -51,19 +53,83 @@ def destination_label(code: str, served_by: list[str]) -> str:
     return f"{code} · {config.airport_name(code)} · {names}" if names else f"{code} · {config.airport_name(code)}"
 
 
-def scrape_plan(airline_codes: Iterable[str], homes: Iterable[str], destinations: Iterable[str], catalog: Catalog) -> dict[str, int]:
-    """Directional routes a scrape of this selection requests, per airline (mirrors run_scraper.routes_for).
+@dataclass(frozen=True)
+class PlanEntry:
+    """Routes one airline's scrape requests, and how far that count can be trusted.
 
-    A Frontier scrape refreshes an empty catalog before it picks routes, so with no catalog yet the count is
-    an upper estimate from the fallback pairs (same wanted-destination filter), not zero."""
+    bound: "exact" (a scrape visits exactly `routes`), "at_least" (the route list will be re-read first and
+    can only add routes) or "up_to" (no usable route list yet, so every wanted destination is counted)."""
+    code: str
+    routes: int
+    bound: str = "exact"
+
+
+def stale_frontier_homes(homes: Iterable[str], checked: Callable[[str], datetime | None],
+                         now: datetime | None = None) -> list[str]:
+    """Selected homes whose Frontier route page a scrape would re-read first (never listed, or older than the
+    refresh age). `checked(home)` is `database.catalog_checked("F9", home)`."""
+    now = now or datetime.now()
+    out = []
+    for home in (h.upper() for h in homes):
+        if home not in config.FRONTIER_ROUTE_PAGES:
+            continue
+        seen = checked(home)
+        if seen is None or now - seen >= timedelta(days=config.CATALOG_REFRESH_DAYS):
+            out.append(home)
+    return out
+
+
+def scrape_estimate(airline_codes: Iterable[str], homes: Iterable[str], destinations: Iterable[str], catalog: Catalog,
+                    refreshing: Iterable[str] = ()) -> dict[str, PlanEntry]:
+    """Per airline, the directional routes a scrape of this selection requests (mirrors run_scraper.routes_for).
+
+    Avelo's count is exact. Frontier's comes from its route catalog, which a scrape re-reads first for every
+    home in `refreshing`: those counts are "at_least", and with no catalog rows for the
+    selected homes the count is the "up_to" ceiling of every wanted destination from each home with a route page."""
     homes, wanted = [h.upper() for h in homes], {d.upper() for d in destinations}
-    plan: dict[str, int] = {}
+    refreshing = {h.upper() for h in refreshing}
+    plan: dict[str, PlanEntry] = {}
     for airline in (a.upper() for a in airline_codes):
-        if airline == "F9":
-            plan[airline] = 2 * len({(h, d) for h, d in _pairs(airline, homes, catalog) if d in wanted})
+        if airline != "F9":
+            plan[airline] = PlanEntry(airline, 2 * len(homes) * len(wanted & set(config.DESTINATIONS)))
+            continue
+        home_set = set(homes)
+        page_homes = [h for h in homes if h in config.FRONTIER_ROUTE_PAGES]
+        listed = {(o, d) for o, d in (catalog.get(airline) or [])
+                  if (o in home_set or d in home_set) and (o in wanted or d in wanted)}  # database.catalog_routes' filter
+        if not page_homes:
+            plan[airline] = PlanEntry(airline, len(listed))
+        elif not catalog.get(airline):
+            ceiling = 2 * len(page_homes) * len(wanted - home_set)
+            plan[airline] = PlanEntry(airline, ceiling, "up_to" if ceiling else "exact")
         else:
-            plan[airline] = 2 * len(homes) * len(wanted & set(config.DESTINATIONS))
+            plan[airline] = PlanEntry(airline, len(listed), "at_least" if refreshing & set(page_homes) else "exact")
     return plan
+
+
+def scrape_plan(airline_codes: Iterable[str], homes: Iterable[str], destinations: Iterable[str], catalog: Catalog) -> dict[str, int]:
+    """`scrape_estimate`'s route counts alone."""
+    return {code: e.routes for code, e in scrape_estimate(airline_codes, homes, destinations, catalog).items()}
+
+
+def describe_plan(plan: dict[str, PlanEntry]) -> str:
+    """'Avelo 8 · Frontier up to 4 (route list not fetched yet)': only an estimate is worded as one."""
+    parts = []
+    for code, entry in sorted(plan.items(), reverse=True):
+        name = airline_registry.get(code).name
+        if entry.bound == "up_to":
+            parts.append(f"{name} up to {entry.routes} (route list not fetched yet)")
+        elif entry.bound == "at_least":
+            parts.append(f"{name} at least {entry.routes} (route list refreshes first)")
+        else:
+            parts.append(f"{name} {entry.routes}")
+    return " · ".join(parts)
+
+
+def mock_selection(homes: Iterable[str], airline_codes: Iterable[str]) -> tuple[list[str], list[str]]:
+    """What a --mock run really covers: run_scraper forces Avelo, and the mock schedule only flies PRIMARY_HOME."""
+    airline_codes = list(airline_codes)
+    return [h for h in homes if h == config.PRIMARY_HOME], (["XP"] if airline_codes else [])
 
 
 def map_arcs(homes: Iterable[str], served: dict[str, list[str]], selected: Iterable[str], catalog: Catalog) -> list[dict]:

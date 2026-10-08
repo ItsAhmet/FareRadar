@@ -622,3 +622,64 @@ def test_this_weekend_scrape_uses_the_homes_and_airlines_selected_when_clicked(m
     assert not at.exception, at.exception
     cmd = launched[0]
     assert cmd[cmd.index("--origins") + 1] == "ILG,PHL" and cmd[cmd.index("--airlines") + 1] == "XP"
+
+
+def _target_caption(at):
+    (caption,) = [c.value for c in at.sidebar.caption if c.value.startswith("Target:")]
+    return caption
+
+
+def test_scrape_caption_says_a_plain_zero_when_frontier_serves_none_of_the_homes(mock_db):
+    database.upsert_catalog("F9", [("PHL", "MCO"), ("MCO", "PHL")], "route-page")    # fetched, but not for ILG
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    _pick(at, "Home airports", ["ILG"])
+    _pick(at, "Airports", ["TPA", "MCO"])
+    caption = _target_caption(at)
+    assert "Frontier 0" in caption and "up to" not in caption and "not fetched" not in caption
+
+
+def test_scrape_caption_calls_a_partial_frontier_catalog_a_minimum(mock_db):
+    database.upsert_catalog("F9", [("PHL", "MCO"), ("MCO", "PHL")], "route-page")    # BWI's page was never read
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    _pick(at, "Home airports", ["PHL", "BWI"])
+    _pick(at, "Airports", ["MCO"])
+    assert "Frontier at least 2 (route list refreshes first)" in _target_caption(at)
+
+
+def test_mock_source_launches_and_words_only_what_the_mock_run_covers(mock_db, launched):
+    database.upsert_catalog("F9", [(h, d) for h in ("PHL", "BWI") for d in ("MCO", "TPA") for h, d in ((h, d), (d, h))], "route-page")
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    _pick(at, "Home airports", ["ILG", "PHL"])
+    _pick(at, "Airports", ["TPA", "MCO"])
+    next(r for r in at.radio if r.label == "Source").set_value("Mock data").run()
+    caption = _target_caption(at)
+    assert "Frontier" not in caption and "Target: 4 routes" in caption and "Avelo 4" in caption and "ILG only" in caption
+    next(b for b in at.button if "Execute Target Scrape" in b.label).click().run()
+    assert not at.exception, at.exception
+    cmd = launched[0]
+    assert "--mock" in cmd and cmd[cmd.index("--airlines") + 1] == "XP" and cmd[cmd.index("--origins") + 1] == "ILG"
+    import json
+    import run_scraper
+    assert run_scraper.main(cmd[2:] + ["--no-alerts"]) == 0           # the command the screen launched, run for real on tmp_path
+    with database.connection() as c:
+        runs = [(r["airline"], json.loads(r["routes"])) for r in c.execute("SELECT airline, routes FROM scrape_runs")]
+    assert runs == [("XP", ["ILG-TPA", "TPA-ILG", "ILG-MCO", "MCO-ILG"])]    # 4 routes, as the caption said, all Avelo
+
+
+def test_mock_source_without_the_primary_home_cannot_launch(mock_db, launched):
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    _pick(at, "Home airports", ["PHL"])
+    next(r for r in at.radio if r.label == "Source").set_value("Mock data").run()
+    assert next(b for b in at.button if "Execute Target Scrape" in b.label).disabled
+    assert any("Mock data only flies" in c.value for c in at.sidebar.caption)
+    assert launched == []
+
+
+def test_this_weekend_under_mock_data_launches_the_mock_selection(mock_db, launched):
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    _pick(at, "Home airports", ["ILG", "PHL"])
+    next(r for r in at.radio if r.label == "Source").set_value("Mock data").run()
+    next(b for b in at.button if "This weekend" in b.label).click().run()
+    assert not at.exception, at.exception
+    cmd = launched[0]
+    assert "--mock" in cmd and cmd[cmd.index("--airlines") + 1] == "XP" and cmd[cmd.index("--origins") + 1] == "ILG"

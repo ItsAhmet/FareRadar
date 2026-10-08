@@ -228,7 +228,7 @@ def _http_get(url: str) -> str:
         return response.read().decode("utf-8", "replace")
 
 
-def refresh_catalog(origins: Iterable[str], conn=None, max_age_days: int = 7, now: datetime | None = None,
+def refresh_catalog(origins: Iterable[str], conn=None, max_age_days: int = config.CATALOG_REFRESH_DAYS, now: datetime | None = None,
                     fetch: Callable[[str], str] | None = None) -> int:
     """Re-read Frontier's public route pages for home airports whose catalog is older than `max_age_days`.
 
