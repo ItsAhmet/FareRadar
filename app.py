@@ -448,11 +448,8 @@ def rule_panel() -> None:
             )
             database.add_watch("rule", label.strip(), payload)
             st.success(f"Saved rule '{label.strip()}'. You'll be alerted when new packages match.")
-        st.caption(
-            "Push alerts go to ntfy topic "
-            + (f"`{config.NTFY_TOPIC}`" if config.NTFY_TOPIC else "**(not set — add AVELO_NTFY_TOPIC to .env)**")
-            + "; every alert also appears in the Watchlist & alerts tab."
-        )
+        st.caption(("Push alerts are on (ntfy)" if config.NTFY_TOPIC else "Push alerts are off — add AVELO_NTFY_TOPIC to .env")
+                   + "; every alert also appears in the Watchlist & alerts tab.")
 
 
 def scheduler_panel() -> None:
@@ -697,7 +694,8 @@ def system_map(selected: list[str]) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def member_badge() -> None:
+def member_badge(itins: list[Itinerary]) -> None:
+    member = database.memberships()
     roi = bookings.plus_roi()
     tone = "0,158,115" if roi["paid_off"] else "230,159,0"
     roi_text = (
@@ -705,15 +703,27 @@ def member_badge() -> None:
         f" ({roi['ratio']:.1f}×, {roi['bookings']} booked trip{'s' if roi['bookings'] != 1 else ''})"
         if roi["annual_cost"] else f"Plus value: ${roi['total_value']:,.0f}"
     )
-    st.markdown(
+    plus_pill = (
         f'<div style="display:inline-block;padding:6px 12px;border-radius:999px;'
         f'background:rgba(0,158,115,0.12);border:1px solid rgba(0,158,115,0.5);font-size:0.9rem;margin-bottom:8px">'
-        f'✅ <strong>{config.MEMBER_BADGE}</strong> · add-on fees locked at ${BENEFITS.total:.2f} on Avelo legs; Frontier carry-on not included</div>'
-        f' <div style="display:inline-block;padding:6px 12px;border-radius:999px;'
+        f'✅ <strong>{config.MEMBER_BADGE}</strong> · add-on fees locked at ${BENEFITS.total:.2f} on Avelo legs; Frontier carry-on not included</div> '
+        if member["XP"] else ""
+    )
+    st.markdown(
+        plus_pill
+        + f'<div style="display:inline-block;padding:6px 12px;border-radius:999px;'
         f'background:rgba({tone},0.12);border:1px solid rgba({tone},0.5);font-size:0.9rem;margin-bottom:8px">'
         f'{"🏆" if roi["paid_off"] else "📈"} {roi_text}</div>',
         unsafe_allow_html=True,
     )
+    for code in sorted(config.KNOWN_AIRLINES):
+        if member[code]:
+            continue
+        text = views.program_meter(bookings.program_savings(code), [it for it in itins if code in it.airlines])
+        if text:
+            st.markdown(f'<div style="display:inline-block;padding:6px 12px;border-radius:999px;background:rgba(86,180,233,0.12);'
+                        f'border:1px solid rgba(86,180,233,0.5);font-size:0.9rem;margin-bottom:8px">💡 {text}</div>',
+                        unsafe_allow_html=True)
 
 
 def freshness_panel(homes: list[str], destinations: list[str], version: float) -> None:
@@ -966,7 +976,7 @@ def coverage_line(stats: dict, destinations: list[str], span: tuple[date, date])
     last = (stats.get("last_scraped") or "")[:16].replace("T", " ")
     st.caption(
         f"{stats['flights']:,} fares on {stats['routes']} routes for this selection · "
-        f"{stats['member_fares']:,} are Avelo PLUS member fares · last scraped {last}"
+        f"{stats['member_fares']:,} are member fares · last scraped {last}"
     )
 
 
@@ -1043,7 +1053,7 @@ def results_table(ranked: list[Itinerary], version: float = 0.0) -> None:
     if not all(it.time_verified for it in ranked):
         st.caption("Rows without **Times Verified** come from calendar scrapes (day known, time not). "
                    "Run the scraper with depth *full* to confirm they fit your window's hours.")
-    st.download_button("Download CSV", df.to_csv(index=False).encode(), "avelo_getaways.csv", "text/csv")
+    st.download_button("Download CSV", df.to_csv(index=False).encode(), "getaways.csv", "text/csv")
 
 
 def calendar_heatmap(cal: pd.DataFrame, homes: list[str], destinations: list[str], span: tuple[date, date]) -> None:
@@ -1138,10 +1148,10 @@ def main() -> None:
 
     unread = database.unread_event_count()
     st.title("Flexible Getaways from " + (" / ".join(homes) or "—") + (f"  🔔 {unread}" if unread else ""))
-    member_badge()
     system_map(destinations)
 
     if not (homes and airline_codes):
+        member_badge([])
         st.info("Pick at least one home airport and one airline in the sidebar.")
         return
     coverage = load_selection_stats(tuple(homes), tuple(destinations), span[0], span[1], version)
@@ -1149,11 +1159,13 @@ def main() -> None:
     if destinations:
         freshness_panel(homes, destinations, version)
     if query is None:
+        member_badge([])
         if destinations:
             st.info("Your free window doesn't fit inside the search span. Widen the span or shorten the window.")
         return
 
     itins = run_search(query)
+    member_badge(itins)
     horizon = date.today() + timedelta(days=16)
     if any(it.outbound.departure_date <= horizon for it in itins):
         codes = {it.destination for it in itins if it.outbound.departure_date <= horizon}

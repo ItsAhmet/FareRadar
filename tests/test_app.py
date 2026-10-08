@@ -579,7 +579,7 @@ def test_saving_a_membership_change_reprices_everything_the_page_shows(mock_db):
     assert not at.exception, at.exception
     before = _heatmap_cells(at)
     coverage = lambda: next(c.value for c in at.caption if "member fares" in c.value)
-    assert before and "are Avelo PLUS member fares" in coverage() and "· 0 are" not in coverage()
+    assert before and "are member fares" in coverage() and "· 0 are" not in coverage()
     next(c for c in at.checkbox if c.key == "member_XP").set_value(False).run()
     next(b for b in at.button if b.key == "save_settings").click().run()
     assert not at.exception, at.exception
@@ -588,7 +588,7 @@ def test_saving_a_membership_change_reprices_everything_the_page_shows(mock_db):
     assert xp and all(r["price"] == r["base_price"] and not r["is_member_fare"] for r in xp)   # stored fares repriced
     at.run()
     assert _heatmap_cells(at) != before                                   # the price calendar shows the new prices
-    assert "· 0 are Avelo PLUS member fares" in coverage()                # and so does the coverage line
+    assert "· 0 are member fares" in coverage()                # and so does the coverage line
     state = database.list_watches("package")[0]["state"]
     assert "last_total" not in state and "alert_base" not in state        # price alerts restart from the new basis
     assert database.list_events(notify_only=True) == []
@@ -726,3 +726,22 @@ def test_airline_vs_airline_tab_budget_hint_mentions_filters(mock_db, monkeypatc
     assert not at.exception, at.exception
     msgs = [i.value for i in at.info if "Only one airline" in i.value]
     assert msgs and all("raise the budget" in m for m in msgs)
+
+
+def test_ntfy_topic_never_appears_on_screen(mock_db, monkeypatch):
+    monkeypatch.setattr(config, "NTFY_TOPIC", "super-secret-topic-123")
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    assert not at.exception
+    rendered = " ".join(str(getattr(el, "value", "")) for group in (at.markdown, at.caption, at.sidebar.caption, at.sidebar.markdown, at.info, at.warning, at.success)
+                        for el in group)
+    assert "super-secret-topic-123" not in rendered and "Push alerts are on" in rendered
+
+
+def test_discount_den_meter_appears_when_frontier_packages_are_listed(mock_db, monkeypatch):
+    monkeypatch.setattr(config, "HOME_CODES", ["ILG", "PHL"])
+    add_frontier_copy()
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    assert any("Discount Den would save" in m.value for m in at.markdown)
+    database.set_membership("F9", True)
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    assert not any("Discount Den would save" in m.value for m in at.markdown)      # already a member
