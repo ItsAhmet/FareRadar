@@ -705,3 +705,24 @@ def test_airline_vs_airline_tab_compares_the_same_weekend(mock_db, monkeypatch):
 def test_airline_vs_airline_tab_explains_single_airline_data(mock_db):
     at = AppTest.from_file(str(APP), default_timeout=90).run()
     assert any("Only one airline has packages" in i.value for i in at.info)
+
+
+def test_airline_vs_airline_tab_does_not_say_scrape_when_the_airline_is_only_deselected(mock_db, monkeypatch):
+    monkeypatch.setattr(config, "HOME_CODES", ["ILG", "PHL"])
+    add_frontier_copy()
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    _pick(at, "Airlines", ["XP"])
+    msgs = [i.value for i in at.info if "Only one airline" in i.value]
+    assert msgs, "the tab should still explain why there is nothing to compare"
+    assert not any("Scrape the other airline" in m for m in msgs)
+    assert any("Select both" in m for m in msgs)
+
+
+def test_airline_vs_airline_tab_budget_hint_mentions_filters(mock_db, monkeypatch):
+    monkeypatch.setattr(config, "HOME_CODES", ["ILG", "PHL"])
+    add_frontier_copy()
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    next(s for s in at.slider if s.label == "Max total getaway cost ($)").set_value(50).run()
+    assert not at.exception, at.exception
+    msgs = [i.value for i in at.info if "Only one airline" in i.value]
+    assert msgs and all("raise the budget" in m for m in msgs)

@@ -901,7 +901,7 @@ def alerts_tab() -> None:
             st.rerun()
 
 
-def comparison_tab(itins: list[Itinerary]) -> None:
+def comparison_tab(itins: list[Itinerary], selected_airlines: list[str] | None = None) -> None:
     """Same free window, same destination: each airline's best package, from whichever home airport is cheapest."""
     df = views.airline_comparison(itins)
     if df.empty:
@@ -909,7 +909,12 @@ def comparison_tab(itins: list[Itinerary]) -> None:
         return
     names = [airlines.get(code).name for code in sorted(config.KNOWN_AIRLINES, reverse=True)]
     if not all(df[n].notna().any() for n in names):
-        st.info("Only one airline has packages for this selection. Scrape the other airline for the same dates to compare.")
+        if selected_airlines is not None and len(set(selected_airlines) & set(config.KNOWN_AIRLINES)) < len(config.KNOWN_AIRLINES):
+            # The owner's own Airlines filter removed one side: scraping would not help, reselecting does.
+            st.info("Only one airline is selected. Select both in the Airlines filter (sidebar) to compare.")
+        else:
+            st.info("Only one airline has packages for this selection. Scrape the other airline for the same dates to compare, "
+                    "or raise the budget / relax the filters if it is already scraped.")
     st.caption("Cost per package: both fares, plus parking and the drive to the home airport when set in Settings "
                "(door-to-door when a destination place is entered). Mixed-airline packages are in the main table.")
     st.dataframe(df, hide_index=True, width="stretch",
@@ -1190,7 +1195,7 @@ def main() -> None:
         else:
             st.info("No valid packages. Widen the span, lower the minimum nights, raise the budget, or scrape more routes.")
     with tab_compare:
-        comparison_tab(itins)
+        comparison_tab(itins, airline_codes)
     with tab_inspect:
         if ranked:
             package_inspector(ranked, version)
