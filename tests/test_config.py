@@ -86,3 +86,10 @@ def test_airline_settings_and_frontier_airports():
 def test_carry_on_fee_estimates():
     assert set(config.CARRY_ON_FEE) == set(config.KNOWN_AIRLINES)
     assert config.CARRY_ON_FEE["XP"] >= 0 and config.CARRY_ON_FEE["F9"] > 0
+
+
+def test_frontier_airports_seen_on_its_route_pages_are_known():
+    # CVG and GUA appeared on Frontier's BWI page (Oct 2026); an unknown code is dropped from the destination list.
+    assert {"CVG", "GUA"} <= set(config.FRONTIER_AIRPORTS)
+    assert config.FRONTIER_AIRPORTS["CVG"].region == "Midwest"
+    assert config.FRONTIER_AIRPORTS["GUA"].region == "Mexico & Central America"

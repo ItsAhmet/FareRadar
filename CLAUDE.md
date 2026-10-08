@@ -19,7 +19,7 @@ Desktop: iCloud "Optimize Mac Storage" evicted ~20k `.venv` files (`ls -lO` show
 ```bash
 cd ~/avelo-finder
 source .venv/bin/activate            # venv already built; playwright chromium installed
-pytest -q                            # tests, no network; AppTest boots the dashboard (461 passed)
+pytest -q                            # tests, no network; AppTest boots the dashboard (465 passed)
 streamlit run app.py                 # dashboard (nothing scrapes on load)
 python launch.py [--detach|--stop]   # start if needed + open browser; ~/Desktop/Avelo Finder.command calls it
 python run_scraper.py --destinations TPA,LAL --start 2026-10-01 --end 2026-10-14   # targeted live scrape
@@ -147,8 +147,11 @@ directory; keep both files. A scratch `AVELO_DB_PATH` for a test run may have an
 - Fare semantics: `price` = what the owner would pay (program fare if a member of that airline's program, else
   public), `base_price` = public fare, `member_price` = program fare. Frontier fares are shown in packages, the fare calendar and the freshness table (which lists each airline's
   routes separately; `route_freshness` and `selection_stats` take `airlines=`), and Frontier runs raise signals.
-- **Known limitations.** The public route page is paginated: only about 20 of ~30 destinations per home airport
-  reach `route_catalog`, so unlisted routes need `--routes` (e.g. `--airlines F9 --routes PHL-MCO`).
+- **Known limitations.** The public route page shows its 20 cheapest destinations per home airport; paging
+  through all of its fares (probed 2026-10-08: 200 fares, 10 pages) adds only 1-3 more (PHL 21, BWI 23), and which
+  ones varies week to week. `route_catalog` keeps every route seen for 45 days, so weekly refreshes fill it in; a
+  route that is still missing needs `--routes` (e.g. `--airlines F9 --routes PHL-IAH`). Fetching the extra pages
+  needs a browser and a bearer token (the airTRFX GraphQL API rejects a plain replay), so it is not built.
   `frontier.is_challenge_page` markers are **unverified**: no real challenge page has been captured, so a
   missed one shows up as a plain `ScrapeError` (nothing deleted) instead of stopping the run as blocked.
   The live Frontier check (plan Task 9 Step 2) is done with the owner; when a real challenge or results page is
@@ -223,8 +226,8 @@ directory; keep both files. A scratch `AVELO_DB_PATH` for a test run may have an
 - `run_scraper --from-rules` is what the nightly job runs; `AVELO_AIRLINES` caps which airlines it scrapes.
 - Carry-on fees are estimates in `config.CARRY_ON_FEE`, counted only when a query asks (`count_carry_on`), per leg
   by that leg's airline. Avelo PLUS perks ($0 add-ons) apply to Avelo legs only.
-- Known limits: Frontier's public route page lists about 20 of ~30 destinations per home airport (pass others with
-  `--routes`); carry-on fees are estimates (`config.CARRY_ON_FEE`); bot-challenge detection has never been seen live
+- Known limits: Frontier's public route page lists its 20 cheapest destinations per home airport (1-3 more exist and
+  rotate in over weekly refreshes; pass a missing one with `--routes`); carry-on fees are estimates (`config.CARRY_ON_FEE`); bot-challenge detection has never been seen live
   (see "How Frontier's site works"); Frontier route floors come only from detail/full runs (a calendar-only run never sets
   one). The sidebar has the airline, home airport, open-jaw and carry-on controls and a Settings panel for memberships.
 - A run's `status` (ok/partial/failed) decides whether it can be a signal baseline.
@@ -254,8 +257,9 @@ install the nightly job from the sidebar.
 
 ## What remains after the four phases
 
-- Frontier's public route page lists only about 20 of ~30 destinations per home airport ("route list page 2" is not fetched),
-  so the rest need `--routes`.
+- Frontier's public route page lists its 20 cheapest destinations per home airport; the 1-3 others rotate in over weekly
+  refreshes (the catalog keeps routes 45 days) or need `--routes`.
+- Dashboard screens that show a package price mark a Frontier calendar price as unverified (`views.price_note`).
 - Carry-on fees (`AVELO_CARRY_ON_XP` / `AVELO_CARRY_ON_F9`) are estimates, not scraped.
 - `frontier.is_challenge_page` has never matched a real challenge page; a missed one is a plain `ScrapeError`.
 - Frontier route floors are set only by detail/full runs; the calendar-only nightly job never sets one.

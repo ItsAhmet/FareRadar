@@ -760,10 +760,14 @@ def package_inspector(ranked: list[Itinerary], version: float) -> None:
         return
     labels = [
         f"#{i} {it.destination_city} · {it.route_mix} · {it.window.label} · ${it.total_price:,.0f}"
+        + (" · unverified" if views.price_note(it) else "")
         for i, it in enumerate(top, start=1)
     ]
     choice = st.selectbox("Inspect a package", labels, index=0)
     it = top[labels.index(choice)]
+    if views.price_note(it):
+        st.caption(f"⚠️ This total rests on an {views.price_note(it)}: the day's lowest fare, possibly a connection. "
+                   "Run a full or detail scrape for these dates to confirm the nonstop fare before booking.")
     b1, b2, b3 = st.columns([1, 1, 2])
     if b1.button("★ Watch this package", help="Alert me when its total drops or a leg disappears"):
         watch_id, created = alerts.watch_package(it)
@@ -840,6 +844,7 @@ def wildcard_panel(itins: list[Itinerary]) -> None:
                 f"**{match.destination_city}** · {match.route_mix} · {match.window.label} · "
                 f"out {match.outbound.departure_date:%a %b %d}, back {match.inbound.departure_date:%a %b %d} · "
                 f"**${match.total_price:,.0f}** all-in · {match.trend}"
+                + (f" · ⚠️ {views.price_note(match)}" if views.price_note(match) else "")
             )
 
 
@@ -952,10 +957,16 @@ def season_tab(itins: list[Itinerary], windows: int) -> None:
     rows = [
         {"Window": t.window.label, "Destination": t.destination_city, "Route Mix": t.route_mix,
          "Out": t.outbound.departure_date.strftime("%a %b %d"), "Back": t.inbound.departure_date.strftime("%a %b %d"),
-         "Cost": t.total_price, "Fit": t.fit, "Sun": t.sun_score}
+         "Cost": t.total_price, "Fit": t.fit, "Sun": t.sun_score, "Unverified": ", ".join(views.unverified_airlines(t))}
         for t in plan.trips
     ]
-    st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch",
+    season = pd.DataFrame(rows)
+    if not season["Unverified"].any():
+        season = season.drop(columns="Unverified")   # nothing to mark: no column
+    else:
+        st.caption("**Unverified**: that airline's leg is a calendar price (the day's lowest, possibly a connection); "
+                   "a full or detail scrape confirms the real nonstop fare.")
+    st.dataframe(season, hide_index=True, width="stretch",
                  column_config={"Cost": st.column_config.NumberColumn(format="$%d"),
                                 "Fit": st.column_config.ProgressColumn(min_value=0, max_value=1, format="%.0f%%"),
                                 "Sun": st.column_config.ProgressColumn(min_value=0, max_value=1, format="%.2f")})
@@ -998,13 +1009,13 @@ def metrics(itins: list[Itinerary], windows: int) -> None:
     c1.metric(
         "Cheapest getaway",
         f"${cheapest.total_price:,.0f}",
-        f"{cheapest.destination_city} · {cheapest.route_mix} · {cheapest.window.label}",
+        " · ".join(filter(None, [cheapest.destination_city, cheapest.route_mix, cheapest.window.label, views.price_note(cheapest)])),
         delta_color="off",
     )
     c2.metric(
         "Best window fit",
         f"{best_fit.fit:.0%} · ${best_fit.total_price:,.0f}",
-        f"{best_fit.destination_city} · {best_fit.route_mix} · {best_fit.window.label}",
+        " · ".join(filter(None, [best_fit.destination_city, best_fit.route_mix, best_fit.window.label, views.price_note(best_fit)])),
         delta_color="off",
     )
     c3.metric("Valid packages", f"{len(itins):,}")

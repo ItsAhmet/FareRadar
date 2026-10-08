@@ -105,8 +105,8 @@ detail or full run confirms the nonstop's times and fare. Carry-on bags are esti
 Avelo PLUS perks apply to Avelo legs only, and a package shows what a membership would save on legs you pay the public
 fare on.
 
-Known limits: Frontier's public route page lists only about 20 of ~30 destinations per home airport, so for a route that
-is not listed pass it with `--routes`. Carry-on fees are estimates, not scraped. Frontier's bot-challenge page has never been
+Known limits: Frontier's public route page lists its 20 cheapest destinations per home airport (it flies 1-3 more, which
+appear over later weekly refreshes); for a route that is not listed yet pass it with `--routes`. Carry-on fees are estimates, not scraped. Frontier's bot-challenge page has never been
 seen live, so a blocked run would show as a plain scrape error. A Frontier route floor is set only by detail or full runs,
 never by the calendar-only nightly job.
 

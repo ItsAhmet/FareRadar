@@ -251,3 +251,17 @@ def test_packages_table_airline_tag_and_hidden_columns():
     avelo_only = [it for it in build_itineraries(outs[:1], backs[:1], query)]
     assert avelo_only and views.hidden_package_columns(to_dataframe(avelo_only)) == ["Program would save"]
     assert views.hidden_package_columns(pd.DataFrame({"Rank": []})) == []
+
+
+def test_price_note_marks_a_package_resting_on_an_unbookable_calendar_price():
+    f9_calendar = Flight(airline="F9", origin="PHL", destination="MCO", departure_datetime=datetime(2026, 10, 8), price=40,
+                         member_price=40, flight_id="F9CAL-PHL-MCO")                    # day known, time and fare not
+    timed_back = leg("F9", "MCO", "PHL", 11, 16, 50)
+    (it,) = build_itineraries([f9_calendar], [timed_back], GetawayQuery({"MCO"}, [WINDOW], origins=["PHL"]))
+    assert views.price_note(it) == "unverified Frontier calendar price"
+    (verified,) = build_itineraries([leg("F9", "PHL", "MCO", 8, 9, 60)], [timed_back], GetawayQuery({"MCO"}, [WINDOW], origins=["PHL"]))
+    assert views.price_note(verified) == ""
+    avelo_calendar = Flight(airline="XP", origin="ILG", destination="MCO", departure_datetime=datetime(2026, 10, 8), price=70,
+                            flight_id="LOWFARE-ILG-MCO")
+    (xp,) = build_itineraries([avelo_calendar], [leg("XP", "MCO", "ILG", 11, 15, 80)], GetawayQuery({"MCO"}, [WINDOW], origins=["ILG"]))
+    assert views.price_note(xp) == ""                                                    # Avelo's calendar fare is bookable

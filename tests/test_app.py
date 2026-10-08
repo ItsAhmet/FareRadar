@@ -972,3 +972,42 @@ def test_scrape_by_another_process_reaches_every_cached_reader(mock_db):
     packages = _packages_table(at).value
     tampa = packages[(packages["Out Route"] == "ILG→TPA") & (packages["Back Route"] == "TPA→ILG")]
     assert len(tampa) > 0 and tampa["Signals"].str.contains("sale").all()   # the badge map was re-read
+
+
+def add_frontier_calendar_placeholders(price: float = 15.0) -> None:
+    """Frontier calendar rows (day known, no time, Discount Den price only) on the Avelo mock dates, from PHL, very cheap."""
+    with database.connection() as conn:
+        conn.execute(f"""
+            INSERT OR IGNORE INTO avelo_flights (flight_id, origin, destination, departure_datetime, arrival_datetime, price, currency,
+                duration_minutes, flight_number, base_price, member_price, is_member_fare, promo_code, airline, timestamp_scraped)
+            SELECT DISTINCT 'F9CAL-' || CASE origin WHEN 'ILG' THEN 'PHL' ELSE origin END || '-' || CASE destination WHEN 'ILG' THEN 'PHL' ELSE destination END,
+                   CASE origin WHEN 'ILG' THEN 'PHL' ELSE origin END, CASE destination WHEN 'ILG' THEN 'PHL' ELSE destination END,
+                   substr(departure_datetime, 1, 10) || 'T00:00', NULL, {price}, 'USD', NULL, NULL, NULL, {price}, 0, NULL, 'F9', timestamp_scraped
+            FROM avelo_flights WHERE origin = 'ILG' OR destination = 'ILG'
+        """)
+
+
+def test_unverified_frontier_prices_are_marked_wherever_a_package_price_is_shown(mock_db, monkeypatch):
+    monkeypatch.setattr(config, "HOME_CODES", ["ILG", "PHL"])
+    add_frontier_calendar_placeholders()
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    assert not at.exception, at.exception
+    cheapest = next(m for m in at.metric if m.label == "Cheapest getaway")
+    assert "unverified Frontier calendar price" in cheapest.delta                       # the headline number
+    inspect = next(sb for sb in at.selectbox if sb.label == "Inspect a package")
+    assert "unverified" in inspect.options[0]                                           # the package inspector
+    season = [df.value for df in at.dataframe if {"Cost", "Fit", "Sun"} <= set(df.value.columns)]
+    assert season and "Unverified" in season[0].columns and (season[0]["Unverified"] == "Frontier").any()   # the season plan
+    next(b for b in at.button if "Wildcard weekend" in b.label).click().run()
+    assert not at.exception, at.exception
+    picks = [s.value for s in at.success if "all-in" in s.value]
+    assert picks                                                                        # a pick is shown…
+    tables = [df.value for df in at.dataframe if "Airlines" in df.value.columns]
+    assert tables                                                                       # …and the page still renders
+
+
+def test_no_unverified_marks_on_avelo_only_data(mock_db):
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    assert "unverified" not in next(m for m in at.metric if m.label == "Cheapest getaway").delta
+    season = [df.value for df in at.dataframe if {"Cost", "Fit", "Sun"} <= set(df.value.columns)]
+    assert season and "Unverified" not in season[0].columns

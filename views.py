@@ -171,6 +171,12 @@ def _cost(it: Itinerary) -> float:
     return it.door_to_door_cost if it.door_to_door_cost is not None else round(it.total_price + it.home_side_cost, 2)
 
 
+def price_note(it: Itinerary) -> str:
+    """Short warning for any place a package's price is shown: '' when every leg is a bookable fare."""
+    names = unverified_airlines(it)
+    return f"unverified {' & '.join(names)} calendar price" if names else ""
+
+
 def unverified_airlines(it: Itinerary) -> list[str]:
     """Names of the airlines whose fare in this package is a calendar price that is not a bookable fare
     (Frontier: the day's lowest Discount Den total of any routing). Empty once a day search has confirmed both legs."""
