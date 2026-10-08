@@ -3,6 +3,7 @@ from datetime import date, datetime, time
 import pytest
 
 import alerts
+import bookings
 import config
 import database as db
 from models import Flight
@@ -517,3 +518,17 @@ def test_mixed_airline_package_title_names_both_airlines(conn):
     (drop,) = alerts.evaluate_packages(conn)
     assert drop.kind == "price_drop" and drop.airline == "XP" and drop.detail["airlines"] == ["F9", "XP"]
     assert alerts.build_message([drop])[0] == "Avelo & Frontier fare dropped"
+
+
+def test_membership_change_can_still_alert_a_booked_trip(conn, monkeypatch):
+    """Documented behaviour (CLAUDE.md/README): package watches and route signals reset on a membership change, but a
+    booked trip compares price_paid with the repriced fares, so it can alert that rebooking is now cheaper."""
+    monkeypatch.setattr(config, "OFFLINE", True)
+    out, back = _frontier_pair()
+    db.upsert_flights([out, back], conn)
+    (it,) = build_itineraries([out], [back], GetawayQuery({"TPA"}, [WINDOW], origins=["PHL"]))
+    db.add_booking("trip", bookings.booking_payload(it), it.total_price, conn=conn)
+    assert alerts.evaluate_and_deliver(None, [], conn)["watch_events"] == 0
+    db.set_membership("F9", True, conn)
+    assert alerts.evaluate_and_deliver(None, [], conn)["watch_events"] == 1
+    assert [e["kind"] for e in _feed(conn)] == ["booked_drop"]

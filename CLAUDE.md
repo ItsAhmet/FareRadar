@@ -18,7 +18,7 @@ Desktop: iCloud "Optimize Mac Storage" evicted ~20k `.venv` files (`ls -lO` show
 ```bash
 cd ~/avelo-finder
 source .venv/bin/activate            # venv already built; playwright chromium installed
-pytest -q                            # tests, no network; AppTest boots the dashboard (352 passed)
+pytest -q                            # tests, no network; AppTest boots the dashboard (357 passed)
 streamlit run app.py                 # dashboard (nothing scrapes on load)
 python launch.py [--detach|--stop]   # start if needed + open browser; ~/Desktop/Avelo Finder.command calls it
 python run_scraper.py --destinations TPA,LAL --start 2026-10-01 --end 2026-10-14   # targeted live scrape
@@ -60,7 +60,7 @@ directory; keep both files. A scratch `AVELO_DB_PATH` for a test run may have an
 | `scraper.py` | Playwright driver for Avelo's form + **pure parsers** (`parse_schedule`, `parse_lowfare_calendar`, `parse_select_page`, `plan_targets`) |
 | `optimizer.py` | `Availability`/`Window`, `GetawayQuery` (`origins`, `airlines`, `allow_open_jaw`, `count_carry_on`), `build_itineraries` (mixed-airline packages, each leg labelled; `Itinerary.airlines`, `program_savings` = what a membership would take off legs the owner pays public fare on), rankings (price/fit/sun/door-to-door), `enrich*`, `wildcard` |
 | `signals.py` | sale wave / sold out / floor detection between consecutive runs of the **same airline**; floors, baselines and events are per airline, so a Frontier sale never moves Avelo's floor |
-| `alerts.py` | watchlist rules + packages, push selection, ntfy + SMTP delivery; alert state is written only after a push is delivered (`StateWrite` / `apply_writes`; with `AVELO_OFFLINE` or no push channel the in-app feed is the delivery); watches compare on fares only (carry-on never counts as a price change); a membership change raises no alert; route signals are pushed only for the watched airline and titles name it; watches/rules evaluated once after all airlines' runs, an airline's route signals pushed right after its run when another airline follows |
+| `alerts.py` | watchlist rules + packages, push selection, ntfy + SMTP delivery; alert state is written only after a push is delivered (`StateWrite` / `apply_writes`; with `AVELO_OFFLINE` or no push channel the in-app feed is the delivery); watches compare on fares only (carry-on never counts as a price change); a membership change raises no package-watch or route-signal alert (a booked trip, or a rule with a price cap, can still alert when the new price basis makes it cheaper); route signals are pushed only for the watched airline and titles name it; watches/rules evaluated once after all airlines' runs, an airline's route signals pushed right after its run when another airline follows |
 | `bookings.py` | booked-trip tracker (each leg knows its airline; old bookings are Avelo) + Plus ROI meter (Avelo legs only; `program_savings(airline)`) |
 | `planner.py` | season planner (one trip per window under a budget) |
 | `holidays.py` | US federal holidays, computed |
@@ -179,11 +179,13 @@ directory; keep both files. A scratch `AVELO_DB_PATH` for a test run may have an
   existing database the column does not exist yet).
 - Packages read every airline in `GetawayQuery.airlines` (default all known); a rule saved without `airlines` is
   Avelo-only, and one without `origins` means the primary home, so old rules behave as before. The fare calendar
-  and the packages table's signal badge are keyed by airline.
+  shows the lowest fare across airlines per route and day (`route_calendar` groups by origin, destination, day);
+  only the packages table's signal badge is keyed by airline.
 - Alert state is written only after a push is delivered (`alerts.StateWrite` / `apply_writes`), so a failed push is
   retried on the next run; with no push channel (or `AVELO_OFFLINE`) the in-app feed is the delivery.
 - Signals, floors and baselines are per airline: `route_floor` is keyed `(airline, origin, destination)` and `events`
-  carries an airline; rows from before Phase 3 were backfilled `XP`. Route signals are pushed only for the watched airline.
+  carries an airline; `route_floor` rows from before Phase 3 were backfilled `XP`, while `events.airline` is NULL for watch-level
+  events and for rows from before the column (readers treat NULL as `XP`; don't filter `WHERE airline='XP'`). Route signals are pushed only for the watched airline.
 - `run_scraper --from-rules` is what the nightly job runs; `AVELO_AIRLINES` caps which airlines it scrapes.
 - Carry-on fees are estimates in `config.CARRY_ON_FEE`, counted only when a query asks (`count_carry_on`), per leg
   by that leg's airline. Avelo PLUS perks ($0 add-ons) apply to Avelo legs only.
@@ -191,7 +193,9 @@ directory; keep both files. A scratch `AVELO_DB_PATH` for a test run may have an
   `--routes`); the dashboard has no controls yet for airlines, open-jaw, carry-on or memberships (Phase 4), so
   those are set through saved rules, the `GetawayQuery` defaults and the settings table.
 - A run's `status` (ok/partial/failed) decides whether it can be a signal baseline.
-- Total Getaway Cost = member fares only; `MemberBenefits` locks add-ons at $0.
+- Total Getaway Cost = the fares the owner pays per leg (member fare where a membership applies, public fare
+  otherwise, e.g. Frontier while not a member) plus add-ons, including carry-on when a query counts it; Avelo PLUS
+  perks ($0 add-ons) apply to Avelo legs only.
 - Long scrapes run as a `Popen` from the dashboard with a log tail, cancel, and timeout.
 - Learning/explanatory output style: give brief `★ Insight` blocks when coding.
 

@@ -45,7 +45,7 @@ source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 playwright install chromium        # one-time browser download (~100 MB)
 cp .env.example .env               # optional: tweak headless mode, DB path, etc.
-pytest -q                          # 352 tests, no network needed
+pytest -q                          # 357 tests, no network needed
 ```
 
 The project lives in `~/avelo-finder`, outside iCloud-synced folders. To start
@@ -174,8 +174,9 @@ filters as an alert rule** stores the current destinations, free window,
 nights, budget and pairing rules; after each run you're told about packages
 that newly match. Route signals are pushed only for routes some watch cares
 about; everything lands in the *Watchlist & alerts* tab (unread count in the
-title). Watches and booked trips compare on fares only (a carry-on estimate never counts as a price change), and a
-membership change raises no alert. Route signals are pushed only for the airline you watch, and their titles name it.
+title). Watches and booked trips compare on fares only (a carry-on estimate never counts as a price change). A membership change
+raises no package-watch or route-signal alert (baselines are reset), but a booked trip can still alert, and a rule
+with a price cap may announce packages the new price basis brings under the cap, because repricing makes them cheaper. Route signals are pushed only for the airline you watch, and their titles name it.
 
 **Delivery.** Set `AVELO_NTFY_TOPIC` in `.env` to an unguessable topic name
 and subscribe to it in the ntfy app (iOS/Android/desktop). Optional email via
@@ -259,8 +260,10 @@ streamlit run app.py
   span to search, minimum nights, budget, mix-and-match toggle with a maximum
   airport-to-airport distance, ranking mode, and the scraper controls.
 * **Header badge**: *Avelo Plus Pricing Active (Free Carry-On & Seat
-  Selection Applied)*. Add-on fees are locked at $0 in the optimizer, so
-  Total Getaway Cost is exactly the two member fares.
+  Selection Applied)*. Total Getaway Cost is what you pay per leg
+  (member fare where a membership applies, public fare otherwise, e.g. Frontier while you are not a member) plus
+  add-ons; Avelo PLUS perks ($0 add-ons) apply to Avelo legs only, and carry-on is added only when a query counts it
+  (the dashboard has no control for that until Phase 4).
 * **Main panel**: coverage line, a per-route **last scraped** table with age,
   metrics, a **Wildcard weekend** button (a random package under budget,
   weighted towards cheap ones), the ranked package table (with **Deal vs
