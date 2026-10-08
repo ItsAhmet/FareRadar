@@ -85,6 +85,16 @@ def test_program_meter_text():
     assert views.program_meter({**den, "legs": 0, "would_have_saved": 0.0}, []) is None
 
 
+def test_program_meter_omits_a_booked_legs_figure_that_is_zero():
+    den = {"airline": "F9", "program": "Discount Den", "legs": 2, "would_have_saved": 0.0}
+    assert views.program_meter(den, []) is None                                  # nothing known or already paid
+    its = build_itineraries([leg("F9", "PHL", "MCO", 8, 9, 60, den=55)], [leg("F9", "MCO", "PHL", 11, 16, 50, den=46)],
+                            GetawayQuery({"MCO"}, [WINDOW], origins=["PHL"]))
+    text = views.program_meter(den, its)
+    assert "booked" not in text and "$0 on" not in text and "package listed now" in text
+    assert "booked leg" in views.program_meter({**den, "would_have_saved": 12.0}, [])
+
+
 def test_program_meter_ignores_the_other_airlines_saving_in_a_mixed_package():
     outs, backs = [leg("XP", "ILG", "MCO", 8, 8, 120, den=90)], [leg("F9", "MCO", "ILG", 11, 16, 50, den=46)]
     its = build_itineraries(outs, backs, GetawayQuery({"MCO"}, [WINDOW], origins=["ILG"]))

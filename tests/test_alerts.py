@@ -125,6 +125,15 @@ def test_delivery_is_noop_when_unconfigured_or_offline(monkeypatch):
     assert alerts.notify_ntfy("t", "b") is False
 
 
+@pytest.mark.parametrize("topic,server", [("FAKE TOPIC-BBB", "http://127.0.0.1:9"), ("FAKE-TOPIC-AAA", "ntfy.sh")])
+def test_notify_ntfy_never_logs_the_topic_even_with_malformed_settings(monkeypatch, caplog, topic, server):
+    monkeypatch.setattr(config, "OFFLINE", False)
+    with caplog.at_level("DEBUG"):
+        assert alerts.notify_ntfy("t", "b", topic=topic, server=server) is False
+    assert "ntfy delivery failed" in caplog.text
+    assert "FAKE" not in caplog.text and topic not in caplog.text and server not in caplog.text
+
+
 def cal(origin, dest, day, price):
     return Flight(origin=origin, destination=dest, departure_datetime=datetime(2026, 10, day), price=price,
                   flight_id=f"LOWFARE-{origin}-{dest}")

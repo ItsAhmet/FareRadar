@@ -378,15 +378,15 @@ def test_saved_rule_without_a_partner_has_none(mock_db):
     assert payload["partner"] is None and payload["airlines"] == sorted(config.KNOWN_AIRLINES)
 
 
-def add_frontier_copy() -> None:
+def add_frontier_copy(member_expr: str = "price - 41") -> None:
     """Frontier fares on the same dates as the Avelo mock schedule, from PHL, $40 cheaper."""
     with database.connection() as conn:
-        conn.execute("""
+        conn.execute(f"""
             INSERT INTO avelo_flights (flight_id, origin, destination, departure_datetime, arrival_datetime, price, currency,
                 duration_minutes, flight_number, base_price, member_price, is_member_fare, promo_code, airline, timestamp_scraped)
             SELECT 'F9-' || flight_id, CASE origin WHEN 'ILG' THEN 'PHL' ELSE origin END,
                    CASE destination WHEN 'ILG' THEN 'PHL' ELSE destination END, departure_datetime, arrival_datetime,
-                   price - 40, currency, duration_minutes, flight_number, price - 40, price - 41, 0, promo_code, 'F9', timestamp_scraped
+                   price - 40, currency, duration_minutes, flight_number, price - 40, {member_expr}, 0, promo_code, 'F9', timestamp_scraped
             FROM avelo_flights WHERE (origin = 'ILG' OR destination = 'ILG') AND arrival_datetime IS NOT NULL
         """)
 
@@ -745,3 +745,29 @@ def test_discount_den_meter_appears_when_frontier_packages_are_listed(mock_db, m
     database.set_membership("F9", True)
     at = AppTest.from_file(str(APP), default_timeout=90).run()
     assert not any("Discount Den would save" in m.value for m in at.markdown)      # already a member
+
+
+def _meter_pills(at) -> list[str]:
+    import re
+    return [re.sub(r"<[^>]+>", "", m.value) for m in at.markdown if "border-radius:999px" in m.value]
+
+
+def test_meter_does_not_claim_zero_savings_when_the_program_fare_is_unknown(mock_db, monkeypatch):
+    monkeypatch.setattr(config, "HOME_CODES", ["ILG", "PHL"])
+    add_frontier_copy(member_expr="NULL")           # Frontier fares scraped without a Discount Den price
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    next(b for b in at.button if b.key == "save_booking").click().run()
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    assert database.list_bookings()
+    pills = _meter_pills(at)
+    assert not any("$0 on" in p for p in pills), pills
+
+
+def test_meter_does_not_claim_zero_savings_for_a_former_member(mock_db):
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    next(b for b in at.button if b.key == "save_booking").click().run()        # booked at the member fare
+    next(c for c in at.checkbox if c.key == "member_XP").set_value(False).run()
+    next(b for b in at.button if b.key == "save_settings").click().run()
+    at.run()
+    meter = [p for p in _meter_pills(at) if "Avelo PLUS would save" in p]
+    assert not any("$0 on" in p for p in meter), meter

@@ -422,15 +422,17 @@ def notify_ntfy(title: str, body: str, topic: str | None = None, server: str | N
     if not topic or config.OFFLINE:
         return False
     url = f"{server or config.NTFY_SERVER}/{topic}"
-    req = urllib.request.Request(
-        url, data=body.encode("utf-8"), method="POST",
-        headers={"Title": title, "Tags": "airplane", "Priority": "default", "Content-Type": "text/plain; charset=utf-8"},
-    )
     try:
+        req = urllib.request.Request(
+            url, data=body.encode("utf-8"), method="POST",
+            headers={"Title": title, "Tags": "airplane", "Priority": "default", "Content-Type": "text/plain; charset=utf-8"},
+        )
         with open_url(req, config.NOTIFY_TIMEOUT_S) as resp:
             return 200 <= resp.status < 300
     except Exception as exc:  # noqa: BLE001
-        log.warning("ntfy delivery failed: %s", exc)
+        # the URL carries the private topic and some exception texts quote it: log the type only
+        code = getattr(exc, "code", None)
+        log.warning("ntfy delivery failed: %s%s", type(exc).__name__, f" (HTTP {code})" if isinstance(code, int) else "")
         return False
 
 

@@ -196,10 +196,12 @@ def _own_program_savings(it: Itinerary, airline: str | None) -> float:
 def program_meter(program: dict, itineraries: list[Itinerary]) -> str | None:
     """Badge text: what the program would have saved on booked legs, and would save on the best listed package."""
     best = max((_own_program_savings(it, program.get("airline")) for it in itineraries), default=0.0)
-    if not program.get("legs") and best <= 0:
+    # a booked-legs figure that rounds to $0 (fares unknown, or already paid at the program price) is not a saving
+    booked = bool(program.get("legs")) and round(program.get("would_have_saved") or 0.0) > 0
+    if not booked and best <= 0:
         return None
     parts = []
-    if program.get("legs"):
+    if booked:
         parts.append(f"${program['would_have_saved']:,.0f} on {program['legs']} booked leg{'s' if program['legs'] != 1 else ''}")
     if best > 0:
         parts.append(f"up to ${best:,.0f} on a package listed now")
