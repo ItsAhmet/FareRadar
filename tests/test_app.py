@@ -18,6 +18,45 @@ def _airports(at):
     return next(m for m in at.multiselect if m.label == "Airports")
 
 
+AVELO, FRONTIER = "🟣 Avelo", "🟢 Frontier"     # the packages table's Airlines cell: a dot in the airline's colour
+
+
+def _rendered(at) -> str:
+    """Everything the script sent to the browser, as text: the protobuf of every element in every container
+    (sidebar and main, any element type: tables, code blocks, charts, widget labels and help), plus each
+    element's value. A test that must prove something is NOT on the page scans this, not a few element kinds."""
+    parts = []
+
+    def walk(node):
+        proto = getattr(node, "proto", None)
+        if proto is not None:
+            parts.append(str(proto))                     # text format: strings appear verbatim, bytes escaped
+            parts.append(proto.SerializeToString().decode("utf-8", "replace"))   # Arrow tables, non-ASCII text
+        for attr in ("value", "label", "help", "options", "placeholder"):
+            try:
+                parts.append(str(getattr(node, attr)))
+            except Exception:
+                pass
+        children = getattr(node, "children", None)
+        if isinstance(children, dict):
+            for child in children.values():
+                walk(child)
+
+    for root in at._tree.children.values():
+        walk(root)
+    return "\n".join(parts)
+
+
+def _packages_table(at):
+    return next(d for d in at.dataframe if "Add-on Fees" in d.value.columns)
+
+
+def _heatmap_rows(at) -> list[str]:
+    import json
+    specs = [json.loads(chart.proto.spec) for chart in at.get("plotly_chart") if chart.proto.spec]
+    return [y for spec in specs for tr in spec.get("data", []) if tr.get("type") == "heatmap" for y in tr["y"]]
+
+
 def _codes(multiselect):
     """Airport codes a multiselect offers: AppTest reports options as displayed ('DEN · Denver · Frontier')."""
     return [o.split(" · ")[0] for o in multiselect.options]
@@ -249,6 +288,9 @@ def test_packages_table_explains_door_to_door_and_home_side_costs(mock_db):
     columns = json.loads(table.proto.columns)
     door, home = columns["Door-to-door"]["help"], columns["Home-side $"]["help"]
     assert "Home-side" in door and "parking" in door
+    # spec §6: the "would save" column only when non-zero. An Avelo PLUS member with Avelo fares has nothing to save.
+    assert (table.value["Program would save"] == 0).all() and "Program would save" not in table.proto.column_order
+    assert "Savings vs Public" in table.proto.column_order and set(table.value["Airlines"]) == {AVELO}
     assert "Parking" in home and "PHL $17" in home and "Settings" in home and "no dashboard control" not in home
 
 
@@ -347,7 +389,7 @@ def test_signal_badge_belongs_to_the_airline_that_raised_it(mock_db, monkeypatch
     assert not at.exception, at.exception
     st.cache_data.clear()
     df = next(d.value for d in at.dataframe if "Add-on Fees" in d.value.columns)
-    avelo_only, frontier_only = df[df["Airlines"] == "Avelo"], df[df["Airlines"] == "Frontier"]
+    avelo_only, frontier_only = df[df["Airlines"] == AVELO], df[df["Airlines"] == FRONTIER]
     assert len(avelo_only) and (avelo_only["Signals"] == "").all(), "a Frontier signal badged an Avelo-only package"
     assert len(frontier_only) and frontier_only["Signals"].str.contains("floor").all()   # Frontier's own badge still shows
     assert not frontier_only["Signals"].str.contains("sold out").any()   # no Frontier fare is left on those days
@@ -397,9 +439,11 @@ def test_dashboard_shows_frontier_packages_with_their_airline(mock_db, monkeypat
     at = AppTest.from_file(str(APP), default_timeout=90).run()
     assert not at.exception, at.exception
     tables = [df.value for df in at.dataframe if "Airlines" in df.value.columns]
-    assert tables and (tables[0]["Airlines"] == "Frontier").any()
-    frontier_rows = tables[0][tables[0]["Airlines"] == "Frontier"]
+    assert tables and (tables[0]["Airlines"] == FRONTIER).any()             # each airline behind a dot in its colour
+    assert set(tables[0]["Airlines"]) <= {AVELO, FRONTIER, "🟣 Avelo out · 🟢 Frontier back", "🟢 Frontier out · 🟣 Avelo back"}
+    frontier_rows = tables[0][tables[0]["Airlines"] == FRONTIER]
     assert (frontier_rows["Program would save"] > 0).all()
+    assert "Program would save" in _packages_table(at).proto.column_order   # there is a saving to show
     assert any("airline" in df.value.columns and (df.value["airline"] == "F9").any() for df in at.dataframe)   # freshness table
 
 
@@ -700,6 +744,11 @@ def test_airline_vs_airline_tab_compares_the_same_weekend(mock_db, monkeypatch):
     both = tables[0].dropna(subset=["Avelo", "Frontier"])
     assert len(both) > 0 and (both["Saves"] >= 0).all()
     assert set(both["Cheaper"]) <= {"Avelo", "Frontier"}
+    # every Frontier fare here came from a day search: nothing is marked, and the column is not drawn
+    table = next(df for df in at.dataframe if "Cheaper" in df.value.columns)
+    assert (tables[0]["Unverified"] == "").all() and "Unverified" not in table.proto.column_order
+    caption = next(c.value for c in at.caption if c.value.startswith("Cost per package"))
+    assert "Unverified" not in caption and "carry-on" not in caption
 
 
 def test_airline_vs_airline_tab_explains_single_airline_data(mock_db):
@@ -732,9 +781,35 @@ def test_ntfy_topic_never_appears_on_screen(mock_db, monkeypatch):
     monkeypatch.setattr(config, "NTFY_TOPIC", "super-secret-topic-123")
     at = AppTest.from_file(str(APP), default_timeout=90).run()
     assert not at.exception
-    rendered = " ".join(str(getattr(el, "value", "")) for group in (at.markdown, at.caption, at.sidebar.caption, at.sidebar.markdown, at.info, at.warning, at.success)
-                        for el in group)
+    next(t for t in at.text_input if t.label == "Rule name").set_value("Florida").run()
+    next(b for b in at.button if b.label == "Save rule").click().run()        # the rule panel is where the topic used to show
+    assert not at.exception
+    rendered = _rendered(at)
     assert "super-secret-topic-123" not in rendered and "Push alerts are on" in rendered
+    # the scan really covers the whole page: a table cell, a widget label, a chart, a sidebar caption, a help text
+    for seen in ("Total Getaway Cost", "Rule name", "Lowest fare", "Target:", "Alert me when its total drops"):
+        assert seen in rendered, seen
+
+
+def test_rendered_scan_sees_every_kind_of_element():
+    """The privacy test above is only as good as `_rendered`: plant a marker in element kinds the old scan skipped."""
+    script = '''
+import pandas as pd
+import streamlit as st
+st.code("in-code MARK1")
+st.dataframe(pd.DataFrame({"col": ["in-table MARK2"]}))
+st.sidebar.text_input("in-label MARK3", help="in-help MARK4")
+with st.expander("in-expander MARK5"):
+    st.json({"k": "in-json MARK6"})
+st.error("in-error MARK7")
+st.selectbox("pick", ["in-option MARK8"])
+with st.sidebar.popover("pop"):
+    st.metric("m", "in-metric MARK9")
+'''
+    at = AppTest.from_string(script, default_timeout=30).run()
+    assert not at.exception, at.exception
+    rendered = _rendered(at)
+    assert [m for m in (f"MARK{i}" for i in range(1, 10)) if m not in rendered] == []
 
 
 def test_discount_den_meter_appears_when_frontier_packages_are_listed(mock_db, monkeypatch):
@@ -780,8 +855,120 @@ def test_map_and_calendar_render_with_two_airlines(mock_db, monkeypatch):
     at = AppTest.from_file(str(APP), default_timeout=90).run()
     assert not at.exception, at.exception
     assert any("Frontier" in m.value and "Avelo" in m.value and "home airport" in m.value for m in at.markdown)   # map legend
-    import json
-    specs = [json.loads(chart.proto.spec) for chart in at.get("plotly_chart") if chart.proto.spec]
-    rows = [y for spec in specs for tr in spec.get("data", []) if tr.get("type") == "heatmap" for y in tr["y"]]
+    rows = _heatmap_rows(at)
     assert "Avelo ILG→TPA" in rows and "Frontier PHL→TPA" in rows                    # fare calendar: one row per airline and route
     assert rows == sorted(rows)                                                      # grouped by airline
+
+
+def _frontier_calendar_only(price: float = 30.0) -> None:
+    """Frontier as the nightly job stores it: one calendar placeholder per day (no time), PHL⇄MCO, on Avelo's ILG⇄MCO days."""
+    from datetime import datetime
+    from models import Flight
+    with database.connection() as conn:
+        days = {route: sorted({date.fromisoformat(r[0]) for r in conn.execute(
+            "SELECT DISTINCT substr(departure_datetime, 1, 10) FROM avelo_flights WHERE origin = ? AND destination = ?", route)})
+            for route in (("ILG", "MCO"), ("MCO", "ILG"))}
+    assert all(days.values())
+    database.upsert_flights([
+        Flight(flight_id=f"F9CAL-{o}-{d}", origin=o, destination=d, departure_datetime=datetime(day.year, day.month, day.day),
+               price=price, base_price=None, member_price=price, airline="F9")
+        for (o, d), key in ((("PHL", "MCO"), ("ILG", "MCO")), (("MCO", "PHL"), ("MCO", "ILG"))) for day in days[key]])
+
+
+def test_airline_vs_airline_tab_marks_frontier_calendar_prices_as_unverified(mock_db, monkeypatch):
+    """The nightly job stores Frontier's calendar price (lowest Discount Den total of any routing). The tab must not
+    present it as Frontier's cost, or name Frontier the cheaper airline from it, without saying so."""
+    monkeypatch.setattr(config, "HOME_CODES", ["ILG", "PHL"])
+    _frontier_calendar_only()
+    database.set_home_cost("PHL", None, 0.0)          # no parking: the $30 calendar legs make Frontier look cheaper
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    assert not at.exception, at.exception
+    _pick(at, "Airports", ["MCO"])
+    table = next(df for df in at.dataframe if "Cheaper" in df.value.columns)
+    rows = table.value.dropna(subset=["Frontier"])
+    assert len(rows) > 0 and (rows["Unverified"] == "Frontier").all()
+    assert "Unverified" in table.proto.column_order
+    won = rows[rows["Cheaper"].str.startswith("Frontier")]
+    assert len(won) > 0 and (won["Cheaper"] == "Frontier (unverified)").all()      # the verdict carries the mark too
+    assert (table.value[table.value["Frontier"].isna()]["Unverified"] == "").all()  # Avelo's calendar fares are bookable
+    caption = next(c.value for c in at.caption if c.value.startswith("Cost per package"))
+    assert "Unverified" in caption and "calendar price" in caption and "Discount Den" in caption and "Frontier" in caption
+    assert any("Frontier rows" in c.value and "Discount Den" in c.value for c in at.caption)   # the fare calendar says it too
+    assert "carry-on" not in caption
+
+    next(c for c in at.checkbox if c.label == "Count a carry-on bag").check().run()   # the figures now include bag fees
+    assert not at.exception, at.exception
+    caption = next(c.value for c in at.caption if c.value.startswith("Cost per package"))
+    assert "carry-on bag on each flight" in caption and f"Frontier ${config.CARRY_ON_FEE['F9']:.0f}" in caption
+    assert "Unverified" in caption
+
+
+def test_airlines_filter_reaches_the_coverage_line_freshness_table_and_calendar(mock_db, monkeypatch):
+    monkeypatch.setattr(config, "HOME_CODES", ["ILG", "PHL"])
+    add_frontier_copy()
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    assert not at.exception, at.exception
+    coverage = lambda: next(c.value for c in at.caption if "for this selection" in c.value)
+    freshness = lambda: next(d.value for d in at.dataframe if "airline" in d.value.columns)
+    span, dests = at.session_state["span"], _airports(at).value
+    count = lambda codes: database.selection_stats(["ILG", "PHL"], dests, span[0], span[1], airlines=codes)["flights"]
+    assert count(["XP"]) > 0 and count(["F9"]) > 0
+    assert coverage().startswith(f"{count(['XP']) + count(['F9']):,} fares") and set(freshness()["airline"]) == {"XP", "F9"}
+    assert {r.split(" ")[0] for r in _heatmap_rows(at)} == {"Avelo", "Frontier"}
+
+    _pick(at, "Airlines", ["XP"])
+    assert _airports(at).value == dests                                   # every default destination is an Avelo one
+    assert coverage().startswith(f"{count(['XP']):,} fares")              # Frontier's fares are not "this selection"
+    assert set(freshness()["airline"]) == {"XP"}
+    assert {r.split(" ")[0] for r in _heatmap_rows(at)} == {"Avelo"}
+
+
+def test_deselected_airlines_fares_do_not_hide_the_scrape_hint(mock_db):
+    """Avelo-only data, Airlines = Frontier: nothing is stored for the selection, and the page must say so."""
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    _pick(at, "Airlines", ["F9"])
+    assert _airports(at).value, "Frontier's fallback list shares destinations with the default selection"
+    assert at.metric[2].value == "0"
+    assert not any("for this selection" in c.value for c in at.caption)
+    assert any("No fares stored yet on Frontier" in w.value and "Execute Target Scrape" in w.value for w in at.warning)
+    assert _heatmap_rows(at) == [] and any("No fares in this span" in i.value for i in at.info)
+    assert not any("airline" in d.value.columns for d in at.dataframe)    # freshness: "No routes scraped yet for this selection."
+
+
+def test_scrape_by_another_process_reaches_every_cached_reader(mock_db):
+    """The nightly job writes while the dashboard is open: coverage, freshness, calendar and signal badges must follow
+    (their loaders are keyed on the database's version; an underscore parameter name would leave it out of the key)."""
+    import os
+    import time
+    from signals import Event
+
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    assert not at.exception, at.exception
+    coverage = lambda: next(c.value for c in at.caption if "for this selection" in c.value)
+    freshness = lambda: next(d.value for d in at.dataframe if "airline" in d.value.columns)
+    before = (coverage(), _heatmap_cells(at), int(freshness()["Fares"].sum()))
+    assert (_packages_table(at).value["Signals"] == "").all()
+
+    with database.connection() as conn:                                # what another process's scrape does
+        first = conn.execute("SELECT origin, destination, substr(departure_datetime, 1, 10) AS day FROM avelo_flights "
+                             "WHERE origin = 'ILG' AND departure_datetime >= ? ORDER BY departure_datetime LIMIT 1",
+                             (at.session_state["span"][0].isoformat(),)).fetchone()    # a day inside the search span
+        conn.execute("UPDATE avelo_flights SET price = 1.0")
+        conn.execute("DELETE FROM avelo_flights WHERE origin = ? AND destination = ? AND substr(departure_datetime, 1, 10) = ?",
+                     (first["origin"], first["destination"], first["day"]))
+        days = [r[0] for r in conn.execute("SELECT DISTINCT substr(departure_datetime, 1, 10) FROM avelo_flights")]
+    run = database.start_run("calendar", [("ILG", "TPA")])
+    database.add_events(run, [Event("sale_wave", o, d, date.fromisoformat(day), "sale", airline="XP")
+                              for day in days for o, d in (("ILG", "TPA"), ("TPA", "ILG"))])
+    database.finish_run(run, {})
+    stamp = time.time() + 5
+    os.utime(mock_db, (stamp, stamp))               # a later write, whatever the clock's resolution
+    at.run()
+    assert not at.exception, at.exception
+    assert coverage() != before[0]                                      # one day's fares are gone
+    cells = _heatmap_cells(at)
+    assert cells != before[1] and {v for grid in cells for row in grid for v in row if v is not None} == {1.0}
+    assert int(freshness()["Fares"].sum()) < before[2]
+    packages = _packages_table(at).value
+    tampa = packages[(packages["Out Route"] == "ILG→TPA") & (packages["Back Route"] == "TPA→ILG")]
+    assert len(tampa) > 0 and tampa["Signals"].str.contains("sale").all()   # the badge map was re-read

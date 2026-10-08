@@ -54,7 +54,7 @@ source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 playwright install chromium        # one-time browser download (~100 MB)
 cp .env.example .env               # optional: tweak headless mode, DB path, etc.
-pytest -q                          # 451 tests, no network needed
+pytest -q                          # 461 tests, no network needed
 ```
 
 The project lives in `~/avelo-finder`, outside iCloud-synced folders. To start
@@ -299,13 +299,15 @@ streamlit run app.py
   add-ons; Avelo PLUS perks ($0 add-ons) apply to Avelo legs only, and carry-on is added only when **Count a carry-on
   bag** is ticked (or a saved rule asks). While you are not a Discount Den member a **💡 Discount Den would save:** pill
   shows what membership would have saved on your booked Frontier legs and on the best package listed now.
-* **Main panel**: coverage line, a per-route **last scraped** table with age,
+* **Main panel**: coverage line, a per-route **last scraped** table with age
+  (both, like the fare calendar, count only the airlines selected in the sidebar),
   metrics, a **Wildcard weekend** button (a random package under budget,
   weighted towards cheap ones), the ranked package table (with **Deal vs
   Typical** against the route medians and a **Trend** arrow versus the
   previous scrape), an **Airline vs airline** tab (for each free window and destination, the best
   Avelo-only and Frontier-only package side by side, who is cheaper and by how much; with data
-  from one airline only it says so), a **Trend & weather** tab (`st.line_chart` of each leg and
+  from one airline only it says so; a Frontier figure that is still a calendar price, not a fare a day
+  search confirmed, is marked **Unverified**, and so is the verdict when Frontier is the cheaper side), a **Trend & weather** tab (`st.line_chart` of each leg and
   the total across scraper runs, plus an Open-Meteo outlook for the
   destination on the trip dates), the fare calendar (one row per airline and route, lowest fare per
   day) and the timeline. The push topic is never shown on screen; the sidebar only says whether

@@ -19,7 +19,7 @@ Desktop: iCloud "Optimize Mac Storage" evicted ~20k `.venv` files (`ls -lO` show
 ```bash
 cd ~/avelo-finder
 source .venv/bin/activate            # venv already built; playwright chromium installed
-pytest -q                            # tests, no network; AppTest boots the dashboard (451 passed)
+pytest -q                            # tests, no network; AppTest boots the dashboard (461 passed)
 streamlit run app.py                 # dashboard (nothing scrapes on load)
 python launch.py [--detach|--stop]   # start if needed + open browser; ~/Desktop/Avelo Finder.command calls it
 python run_scraper.py --destinations TPA,LAL --start 2026-10-01 --end 2026-10-14   # targeted live scrape
@@ -181,7 +181,8 @@ directory; keep both files. A scratch `AVELO_DB_PATH` for a test run may have an
   `member_<code>` / `parking_<code>` / `drive_<code>` (Settings).
 - The sidebar defaults reproduce the pre-Phase-4 screen for an owner with only Avelo data: every home airport, every known airline,
   open-jaw off, carry-on off. A destination is offered when at least one selected airline serves it from at least one selected home
-  airport (route catalog; `views._fallback_pairs` while an airline's catalog is empty). Selecting no airline or no home airport
+  airport (route catalog; `views._fallback_pairs` while an airline's catalog is empty for the selected homes: Frontier from
+  the homes with a route page, Avelo from `config.AVELO_FALLBACK_HOMES`, so never Avelo from PHL or BWI). Selecting no airline or no home airport
   shows a message and keeps the destination selection (it is the state passed through when the only selected airline or home is
   swapped); destinations the new choice no longer serves drop out of `dest_select`.
 - The scrape button runs exactly what the caption says (`run_scraper.py --airlines ... --origins ...`). The caption counts routes
@@ -193,7 +194,16 @@ directory; keep both files. A scratch `AVELO_DB_PATH` for a test run may have an
   Avelo PLUS yes, Frontier Discount Den no. The Discount Den meter (`views.program_meter`) appears while the owner is not a member
   and says what the program would save on booked legs and on the best listed package; each program's meter counts only its own
   airline's legs.
-- The private ntfy topic is never rendered; the sidebar only says whether push alerts are on.
+- The private ntfy topic is never rendered; the sidebar only says whether push alerts are on (`tests/test_app.py::_rendered`
+  scans every element's protobuf, not a list of element kinds).
+- Every cached reader in `app.py` takes `version` (`_db_version()`), never `_version`: Streamlit leaves an underscore
+  parameter out of the cache key, and a scrape the page did not launch would then never reach the screen.
+- The coverage line, freshness table and fare calendar follow the sidebar's Airlines filter (`airlines=` on the three readers).
+- A Frontier calendar price is never shown as a confirmed cost: the Airline vs airline tab has an `Unverified` column and marks
+  the verdict (`views.airline_comparison`), the fare calendar has a footnote (`views.calendar_note`); the rule is
+  `airlines.unverified_calendar_names`, shared with `alerts.unverified_note`.
+- Packages table: the Airlines cell carries a dot in the airline's colour (`Airline.dot`, `views.airline_tag`; the CSV keeps
+  plain names) and "Program would save" is drawn only when some row has a saving (`views.hidden_package_columns`).
 - Package/watch identity is the trip key, never the flight_id row.
 - Every fare delete is scoped to one airline (an Avelo run never deletes or shadows Frontier rows, and vice versa).
 - One scrape run per airline; baselines compare same-airline runs. Watches, rules and bookings are evaluated

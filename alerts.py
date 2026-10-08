@@ -99,8 +99,7 @@ def unverified_note(out: Flight, back: Flight) -> str:
     """A marker for a package total that is not a price the owner can count on: a leg is a calendar placeholder
     of an airline whose calendar price is not a bookable fare (Frontier: the lowest Discount Den total of any
     routing, so the nonstop's standard fare can be much higher). '' when both legs are bookable fares."""
-    names = sorted({airline_registry.get(leg.airline or "XP").name for leg in (out, back)
-                    if not leg.time_known and not airline_registry.get(leg.airline or "XP").calendar_bookable})
+    names = airline_registry.unverified_calendar_names((out, back))
     return f" (unverified {' & '.join(names)} calendar price: times and fare need a detail scrape)" if names else ""
 
 

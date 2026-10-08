@@ -28,6 +28,7 @@ class Airline:
     name: str
     member_program: str
     color: tuple[int, int, int]
+    dot: str  # the same colour as a character, for places that take text only (a table cell)
     # Is the fare calendar's price for a day a fare the owner can book on a nonstop? Avelo's is. Frontier's is
     # the lowest Discount Den total of any routing, often a connection: a different price basis from a day search.
     calendar_bookable: bool = True
@@ -49,13 +50,20 @@ class Airline:
 
 
 AIRLINES: dict[str, Airline] = {
-    "XP": Airline("XP", "Avelo", "Avelo PLUS", (88, 28, 135)),
-    "F9": Airline("F9", "Frontier", "Discount Den", (0, 102, 67), calendar_bookable=False),
+    "XP": Airline("XP", "Avelo", "Avelo PLUS", (88, 28, 135), "🟣"),
+    "F9": Airline("F9", "Frontier", "Discount Den", (0, 102, 67), "🟢", calendar_bookable=False),
 }
 
 
 def get(code: str) -> Airline:
     return AIRLINES[code.strip().upper()]
+
+
+def unverified_calendar_names(legs) -> list[str]:
+    """Sorted names of the airlines with a leg (anything with `airline` and `time_known`) that is a calendar
+    placeholder whose price is not a bookable fare. One rule for alerts and the dashboard."""
+    return sorted({get(leg.airline or "XP").name for leg in legs
+                   if not leg.time_known and not get(leg.airline or "XP").calendar_bookable})
 
 
 def owner_price(member: bool, member_price: float | None, base_price: float | None) -> tuple[float | None, bool]:

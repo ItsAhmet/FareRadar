@@ -155,6 +155,9 @@ ALL_DESTINATIONS: dict[str, Airport] = {**DESTINATIONS, **FRONTIER_AIRPORTS}
 # Avelo destinations Frontier also sells from PHL/BWI. Only a fallback for the dashboard's destination list
 # when the route catalog has not been filled yet; the catalog is the truth once it has.
 FRONTIER_SHARED_DESTINATIONS: tuple[str, ...] = ("MCO", "TPA", "RSW", "SJU", "BNA", "RDU", "PBI")
+# Home airports Avelo flies from. The same kind of fallback: while Avelo's catalog holds nothing for the selected
+# homes, its destinations are offered (and its map arcs drawn) from these only, never from PHL or BWI.
+AVELO_FALLBACK_HOMES: tuple[str, ...] = ("ILG",)
 
 # Avelo's four regions first, in today's order, then the regions only Frontier adds.
 REGIONS: list[str] = list(dict.fromkeys(a.region for a in ALL_DESTINATIONS.values()))

@@ -19,11 +19,17 @@ Catalog = dict[str, list[tuple[str, str]]]  # airline code → directional (orig
 
 
 def _fallback_pairs(airline: str, homes: list[str]) -> list[tuple[str, str]]:
-    """Routes to offer before an airline's catalog has been filled by a scrape."""
+    """Routes to offer while an airline's catalog holds nothing for the selected homes.
+
+    The catalog passed in is already cut down to those homes, so "never filled by a scrape" and "filled, but this
+    airline lists nothing from these homes" look the same here. The fallback is therefore limited to the homes
+    each airline is known to fly from (Frontier: the ones with a route page; Avelo: `config.AVELO_FALLBACK_HOMES`),
+    which makes the second case come out empty instead of as routes nobody flies."""
     if airline == "F9":
         homes = [h for h in homes if h in config.FRONTIER_ROUTE_PAGES]
         away = list(config.FRONTIER_AIRPORTS) + list(config.FRONTIER_SHARED_DESTINATIONS)
     else:
+        homes = [h for h in homes if h in config.AVELO_FALLBACK_HOMES]
         away = list(config.DESTINATIONS)
     return [(h, d) for h in homes for d in away]
 
@@ -165,11 +171,20 @@ def _cost(it: Itinerary) -> float:
     return it.door_to_door_cost if it.door_to_door_cost is not None else round(it.total_price + it.home_side_cost, 2)
 
 
+def unverified_airlines(it: Itinerary) -> list[str]:
+    """Names of the airlines whose fare in this package is a calendar price that is not a bookable fare
+    (Frontier: the day's lowest Discount Den total of any routing). Empty once a day search has confirmed both legs."""
+    return airline_registry.unverified_calendar_names((it.outbound, it.inbound))
+
+
 def airline_comparison(itineraries: list[Itinerary]) -> pd.DataFrame:
     """Per free window and destination: each airline's best single-airline package, side by side.
-    Cost is door-to-door when drive times are known, otherwise fares plus home-side parking/drive."""
+    Cost is door-to-door when drive times are known, otherwise fares plus home-side parking/drive.
+
+    `Unverified` names the airlines whose figure on that row rests on a calendar price nobody can book as shown;
+    when the cheaper side is one of them, `Cheaper` says so, because a day search can reverse the verdict."""
     names = [airline_registry.get(code).name for code in sorted(config.KNOWN_AIRLINES, reverse=True)]  # Avelo, Frontier
-    columns = ["Window", "Destination"] + [c for n in names for c in (n, f"{n} from")] + ["Cheaper", "Saves"]
+    columns = ["Window", "Destination"] + [c for n in names for c in (n, f"{n} from")] + ["Cheaper", "Saves", "Unverified"]
     best: dict[tuple, dict[str, Itinerary]] = {}
     for it in itineraries:
         out, back = it.airlines
@@ -186,10 +201,61 @@ def airline_comparison(itineraries: list[Itinerary]) -> pd.DataFrame:
             row[n] = _cost(slot[n]) if n in slot else None
             row[f"{n} from"] = slot[n].home_label if n in slot else None
         priced = sorted((row[n], n) for n in names if row[n] is not None)
-        row["Cheaper"] = priced[0][1]
+        unverified = [n for n in names if n in slot and unverified_airlines(slot[n])]
+        cheaper = priced[0][1]
+        row["Cheaper"] = f"{cheaper} (unverified)" if cheaper in unverified else cheaper
         row["Saves"] = round(priced[1][0] - priced[0][0], 2) if len(priced) > 1 else None
+        row["Unverified"] = ", ".join(unverified)
         rows.append(row)
     return pd.DataFrame(rows, columns=columns)
+
+
+def comparison_caption(count_carry_on: bool, unverified: Iterable[str] = ()) -> str:
+    """What the Airline vs airline figures are made of, and a warning when some of them are calendar prices."""
+    fees = ", ".join(f"{airline_registry.get(c).name} ${config.CARRY_ON_FEE.get(c, 0.0):.0f}"
+                     for c in sorted(config.KNOWN_AIRLINES, reverse=True))
+    text = ("Cost per package: both fares, "
+            + (f"a carry-on bag on each flight ({fees}), " if count_carry_on else "")
+            + "plus parking and the drive to the home airport when set in Settings "
+              "(door-to-door when a destination place is entered). Mixed-airline packages are in the main table.")
+    names = sorted(set(unverified))
+    if names:
+        text += (f" **Unverified** rows: the {' and '.join(names)} figure is a calendar price (the day's lowest "
+                 f"{_programs(names)} total of any routing, connections included), not a nonstop fare you can book at "
+                 "that price. Run the scraper with depth *full* for those dates before trusting the cheaper airline.")
+    return text
+
+
+def _programs(names: Iterable[str]) -> str:
+    """'Discount Den' for ['Frontier']: the membership programs of the airlines with these names."""
+    wanted = set(names)
+    return " / ".join(sorted(a.member_program for a in airline_registry.AIRLINES.values() if a.name in wanted))
+
+
+def calendar_note(airline_codes: Iterable[str]) -> str | None:
+    """Fare calendar footnote for airlines whose calendar price is not a bookable fare (None when there is none)."""
+    names = sorted(airline_registry.get(c).name for c in set(airline_codes) if not airline_registry.get(c).calendar_bookable)
+    if not names:
+        return None
+    return (f"{' and '.join(names)} rows: on days no day search has confirmed, the price is the calendar's lowest "
+            f"{_programs(names)} total of any routing (connections included), not a nonstop fare you can book at that "
+            "price. A scrape with depth *full* replaces it with the real fare.")
+
+
+def airline_tag(it: Itinerary) -> str:
+    """The packages table's Airlines cell: each airline's name behind a dot in its colour (the map's colours),
+    e.g. '🟣 Avelo', '🟢 Frontier', '🟣 Avelo out · 🟢 Frontier back'."""
+    out, back = (airline_registry.get(code) for code in it.airlines)
+    if out.code == back.code:
+        return f"{out.dot} {out.name}"
+    return f"{out.dot} {out.name} out · {back.dot} {back.name} back"
+
+
+def hidden_package_columns(df: pd.DataFrame) -> list[str]:
+    """Packages-table columns with nothing to say for these rows: 'Program would save' when it is $0 on every row
+    (an owner who is a member of every program whose fares are listed)."""
+    column = "Program would save"
+    return [column] if column in df.columns and not (df[column].fillna(0) != 0).any() else []
 
 
 def _own_program_savings(it: Itinerary, airline: str | None) -> float:

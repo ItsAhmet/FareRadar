@@ -60,10 +60,14 @@ ALL_CODES = list(config.ALL_DESTINATIONS)  # every airport either airline can re
 
 
 # --------------------------------------------------------------------------- #
-# Data access (cached). Streamlit leaves a parameter whose name starts with an underscore out of the
-# cache key, so the loaders that take `_version` are refreshed only by the cache clear after a scrape
-# this page launched. `load_catalog` takes `version` (hashed): any database change invalidates it.
+# Data access (cached). Every loader that reads the database takes `version` (`_db_version()`), and the
+# name has no leading underscore on purpose: Streamlit leaves an underscore parameter out of the cache
+# key, and then a scrape this page did not launch (the nightly job, the CLI) would never reach the
+# calendar, coverage line, freshness table, price history or signal badges of a running dashboard.
+# `max_entries` bounds what the superseded versions leave behind.
 # --------------------------------------------------------------------------- #
+
+VERSIONED = {"show_spinner": False, "max_entries": 64}
 
 
 def _db_version() -> float:
@@ -78,19 +82,22 @@ def _db_version() -> float:
     return newest
 
 
-@st.cache_data(show_spinner=False)
-def load_selection_stats(homes: tuple[str, ...], destinations: tuple[str, ...], start: date, end: date, _version: float) -> dict:
-    return database.selection_stats(list(homes), list(destinations), start, end)
+@st.cache_data(**VERSIONED)
+def load_selection_stats(homes: tuple[str, ...], destinations: tuple[str, ...], airline_codes: tuple[str, ...],
+                         start: date, end: date, version: float) -> dict:
+    """Coverage of the sidebar selection: these homes, destinations and airlines only."""
+    return database.selection_stats(list(homes), list(destinations), start, end, airlines=list(airline_codes))
 
 
-@st.cache_data(show_spinner=False)
-def load_calendar(start: date, end: date, _version: float) -> pd.DataFrame:
-    return pd.DataFrame(database.route_calendar(start, end, by_airline=True))
+@st.cache_data(**VERSIONED)
+def load_calendar(airline_codes: tuple[str, ...], start: date, end: date, version: float) -> pd.DataFrame:
+    return pd.DataFrame(database.route_calendar(start, end, airlines=list(airline_codes), by_airline=True))
 
 
-@st.cache_data(show_spinner=False)
-def load_freshness(homes: tuple[str, ...], destinations: tuple[str, ...], _version: float) -> pd.DataFrame:
-    return pd.DataFrame(database.route_freshness(list(homes), list(destinations)))
+@st.cache_data(**VERSIONED)
+def load_freshness(homes: tuple[str, ...], destinations: tuple[str, ...], airline_codes: tuple[str, ...],
+                   version: float) -> pd.DataFrame:
+    return pd.DataFrame(database.route_freshness(list(homes), list(destinations), airlines=list(airline_codes)))
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -102,8 +109,8 @@ def load_catalog(homes: tuple[str, ...], version: float) -> dict[str, list[tuple
     return {code: database.catalog_routes(code, origins=list(homes)) for code in config.KNOWN_AIRLINES}
 
 
-@st.cache_data(show_spinner=False)
-def load_history(flight_id: str, departure_iso: str, _version: float) -> pd.DataFrame:
+@st.cache_data(show_spinner=False, max_entries=256)
+def load_history(flight_id: str, departure_iso: str, version: float) -> pd.DataFrame:
     rows = database.price_history(flight_id, datetime.fromisoformat(departure_iso))
     df = pd.DataFrame(rows)
     if not df.empty:
@@ -132,8 +139,8 @@ def load_drives(query: str, airports: tuple[str, ...]) -> dict[str, tuple[float,
     return places.drive_table(place, list(airports)) if place else {}
 
 
-@st.cache_data(show_spinner=False)
-def load_signal_map(_version: float) -> dict[tuple[str, str, str, str], set[str]]:
+@st.cache_data(**VERSIONED)
+def load_signal_map(version: float) -> dict[tuple[str, str, str, str], set[str]]:
     """(airline, origin, destination, day) → signal kinds from the most recent run of each airline.
 
     The airline is part of the key: on a route two airlines fly, one airline's sale or sell-out
@@ -717,8 +724,8 @@ def member_badge(itins: list[Itinerary]) -> None:
                         unsafe_allow_html=True)
 
 
-def freshness_panel(homes: list[str], destinations: list[str], version: float) -> None:
-    df = load_freshness(tuple(homes), tuple(destinations), version)
+def freshness_panel(homes: list[str], destinations: list[str], airline_codes: list[str], version: float) -> None:
+    df = load_freshness(tuple(homes), tuple(destinations), tuple(sorted(airline_codes)), version)
     with st.expander("Last scraped per route", expanded=False):
         if df.empty:
             st.write("No routes scraped yet for this selection.")
@@ -902,7 +909,7 @@ def alerts_tab() -> None:
             st.rerun()
 
 
-def comparison_tab(itins: list[Itinerary], selected_airlines: list[str] | None = None) -> None:
+def comparison_tab(itins: list[Itinerary], selected_airlines: list[str] | None = None, count_carry_on: bool = False) -> None:
     """Same free window, same destination: each airline's best package, from whichever home airport is cheapest."""
     df = views.airline_comparison(itins)
     if df.empty:
@@ -916,11 +923,15 @@ def comparison_tab(itins: list[Itinerary], selected_airlines: list[str] | None =
         else:
             st.info("Only one airline has packages for this selection. Scrape the other airline for the same dates to compare, "
                     "or raise the budget / relax the filters if it is already scraped.")
-    st.caption("Cost per package: both fares, plus parking and the drive to the home airport when set in Settings "
-               "(door-to-door when a destination place is entered). Mixed-airline packages are in the main table.")
+    unverified = sorted({n for cell in df["Unverified"] for n in cell.split(", ") if n})
+    st.caption(views.comparison_caption(count_carry_on, unverified))
     st.dataframe(df, hide_index=True, width="stretch",
+                 column_order=[c for c in df.columns if c != "Unverified" or unverified],   # nothing to mark: no column
                  column_config={**{n: st.column_config.NumberColumn(format="$%d") for n in names},
-                                "Saves": st.column_config.NumberColumn(format="$%d", help="How much the cheaper airline saves.")})
+                                "Saves": st.column_config.NumberColumn(format="$%d", help="How much the cheaper airline saves."),
+                                "Unverified": st.column_config.TextColumn(
+                                    help="This airline's figure is a calendar price, not a fare a day search has "
+                                         "confirmed: the real nonstop fare can be much higher.")})
 
 
 def season_tab(itins: list[Itinerary], windows: int) -> None:
@@ -954,13 +965,16 @@ def season_tab(itins: list[Itinerary], windows: int) -> None:
     itinerary_timeline(plan.trips, n=len(plan.trips), key="season_timeline")
 
 
-def coverage_line(stats: dict, destinations: list[str], span: tuple[date, date]) -> None:
+def coverage_line(stats: dict, destinations: list[str], span: tuple[date, date], airline_codes: list[str] | None = None) -> None:
     if not destinations:
         st.info("Pick at least one destination in the sidebar.")
         return
     if not stats.get("flights"):
+        selected = set(airline_codes or config.KNOWN_AIRLINES)
+        who = ("" if selected >= set(config.KNOWN_AIRLINES)   # only a narrowed Airlines filter is worth naming
+               else " on " + " or ".join(sorted(airlines.get(c).name for c in selected)))
         st.warning(
-            f"No fares stored yet for {', '.join(destinations)} between {span[0]:%b %d} and {span[1]:%b %d}. "
+            f"No fares stored yet{who} for {', '.join(destinations)} between {span[0]:%b %d} and {span[1]:%b %d}. "
             "Use **Execute Target Scrape** in the sidebar (try *Mock data* first)."
         )
         return
@@ -1001,6 +1015,9 @@ def results_table(ranked: list[Itinerary], version: float = 0.0) -> None:
     df = to_dataframe(ranked)
     sig = load_signal_map(version)
     df.insert(7, "Signals", [signal_text(it, sig) for it in ranked])
+    csv = df.to_csv(index=False).encode()   # the download keeps plain airline names
+    df["Airlines"] = [views.airline_tag(it) for it in ranked]   # a dot in each airline's colour, as on the map
+    hidden = views.hidden_package_columns(df)
     st.dataframe(
         df,
         hide_index=True,
@@ -1032,19 +1049,19 @@ def results_table(ranked: list[Itinerary], version: float = 0.0) -> None:
             "Member Fare": st.column_config.CheckboxColumn(disabled=True),
             "Times Verified": st.column_config.CheckboxColumn(disabled=True),
         },
-        column_order=[
+        column_order=[c for c in (
             "Rank", "Window", "Destination", "Home", "Airlines", "Route Mix", "Total Getaway Cost", "Deal vs Typical", "Trend", "Signals",
             "Out Route", "Out Date", "Out Time", "Out Price",
             "Back Route", "Back Date", "Back Time", "Back Price",
             "Nights", "Fit", "Sun Score", "Δ°F vs home", "Drive (min)", "Door-to-door", "Home-side $",
             "Member Fare", "Savings vs Public", "Program would save", "Add-on Fees", "Times Verified",
             "Airport Gap (mi)", "Last Scraped",
-        ],
+        ) if c not in hidden],
     )
     if not all(it.time_verified for it in ranked):
         st.caption("Rows without **Times Verified** come from calendar scrapes (day known, time not). "
                    "Run the scraper with depth *full* to confirm they fit your window's hours.")
-    st.download_button("Download CSV", df.to_csv(index=False).encode(), "getaways.csv", "text/csv")
+    st.download_button("Download CSV", csv, "getaways.csv", "text/csv")
 
 
 def calendar_heatmap(cal: pd.DataFrame, homes: list[str], destinations: list[str], span: tuple[date, date]) -> None:
@@ -1089,6 +1106,9 @@ def calendar_heatmap(cal: pd.DataFrame, homes: list[str], destinations: list[str
         xaxis={"showgrid": False, "tickangle": -45},
     )
     st.plotly_chart(fig, width="stretch", key="fare_calendar")
+    note = views.calendar_note(sub.airline.unique())
+    if note:
+        st.caption(note)
 
 
 def itinerary_timeline(ranked: list[Itinerary], n: int = 12, key: str = "timeline") -> None:
@@ -1147,10 +1167,11 @@ def main() -> None:
         member_badge([])
         st.info("Pick at least one home airport and one airline in the sidebar.")
         return
-    coverage = load_selection_stats(tuple(homes), tuple(destinations), span[0], span[1], version)
-    coverage_line(coverage, destinations, span)
+    chosen_airlines = tuple(sorted(airline_codes))   # the coverage line, freshness table and calendar follow the Airlines filter
+    coverage = load_selection_stats(tuple(homes), tuple(destinations), chosen_airlines, span[0], span[1], version)
+    coverage_line(coverage, destinations, span, airline_codes)
     if destinations:
-        freshness_panel(homes, destinations, version)
+        freshness_panel(homes, destinations, airline_codes, version)
     if query is None:
         member_badge([])
         if destinations:
@@ -1200,14 +1221,14 @@ def main() -> None:
         else:
             st.info("No valid packages. Widen the span, lower the minimum nights, raise the budget, or scrape more routes.")
     with tab_compare:
-        comparison_tab(itins, airline_codes)
+        comparison_tab(itins, airline_codes, count_carry_on=query.count_carry_on)
     with tab_inspect:
         if ranked:
             package_inspector(ranked, version)
         else:
             st.info("Nothing to inspect yet.")
     with tab_calendar:
-        calendar_heatmap(load_calendar(span[0], span[1], version), homes, destinations, span)
+        calendar_heatmap(load_calendar(chosen_airlines, span[0], span[1], version), homes, destinations, span)
     with tab_timeline:
         itinerary_timeline(ranked, key="ranked_timeline")
 
