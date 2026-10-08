@@ -532,3 +532,18 @@ def test_catalog_refreshed_by_another_process_reaches_the_destination_list(mock_
     assert not at.exception, at.exception
     offered = _codes(_airports(at))
     assert "DEN" not in offered and "MCO" in offered
+
+
+def test_settings_panel_changes_membership_and_home_costs(mock_db):
+    at = AppTest.from_file(str(APP), default_timeout=90).run()
+    den = next(c for c in at.checkbox if c.label == "Discount Den member")
+    assert den.value is False and next(c for c in at.checkbox if c.label == "Avelo PLUS member").value is True
+    den.set_value(True).run()
+    next(n for n in at.number_input if n.key == "parking_PHL").set_value(22.0).run()
+    next(n for n in at.number_input if n.key == "drive_PHL").set_value(35).run()
+    next(b for b in at.button if b.key == "save_settings").click().run()
+    assert not at.exception, at.exception
+    assert database.memberships() == {"XP": True, "F9": True}
+    assert database.home_costs()["PHL"] == config.HomeCost(35.0, 22.0)
+    assert database.home_costs()["ILG"].drive_min is None                 # 0 minutes means "not set"
+    assert database.list_events(notify_only=True) == []                   # no alert from the membership change

@@ -395,8 +395,37 @@ def sidebar() -> tuple[GetawayQuery | None, list[str], tuple[date, date], str, d
     scrape_opts = scraper_panel(destinations, span_start, span_end)
     st.sidebar.divider()
     rule_panel()
+    settings_panel()
     scheduler_panel()
     return query, destinations, (span_start, span_end), sort_mode, scrape_opts, homes, airline_codes
+
+
+def settings_panel() -> None:
+    """Owner settings that change what a fare costs you: memberships and home-airport costs."""
+    with st.sidebar.expander("⚙️ Settings"):
+        member = database.memberships()
+        for code in sorted(config.KNOWN_AIRLINES, reverse=True):
+            st.checkbox(f"{airlines.get(code).member_program} member", value=member[code], key=f"member_{code}",
+                        help="Stored fares are re-priced to what you would pay; price alerts restart from the new prices.")
+        costs = database.home_costs()
+        for code in config.HOME_CODES:
+            st.caption(config.HOME_AIRPORTS[code].label)
+            c1, c2 = st.columns(2)
+            c1.number_input("Parking $/day", min_value=0.0, max_value=200.0, step=1.0,
+                            value=float(costs[code].parking_per_day), key=f"parking_{code}")
+            c2.number_input("Drive from home (min)", min_value=0, max_value=600, step=5,
+                            value=int(costs[code].drive_min or 0), key=f"drive_{code}",
+                            help="0 = not set; the drive is then left out of door-to-door cost.")
+        if st.button("Save settings", key="save_settings"):
+            for code in config.KNOWN_AIRLINES:
+                wanted = bool(st.session_state[f"member_{code}"])
+                if wanted != member[code]:
+                    database.set_membership(code, wanted)
+            for code in config.HOME_CODES:
+                drive = int(st.session_state[f"drive_{code}"])
+                database.set_home_cost(code, float(drive) if drive > 0 else None, float(st.session_state[f"parking_{code}"]))
+            _search_cache().clear()
+            st.success("Settings saved.")
 
 
 def rule_panel() -> None:
