@@ -68,16 +68,16 @@ no flight in the span are reported as skipped.
 
 ### Frontier
 
-Frontier Airlines can be scraped alongside Avelo. It is off by default; opt in per run or in `.env`:
+Frontier Airlines is scraped alongside Avelo by default (`AVELO_AIRLINES=XP,F9`). To scrape Avelo only, pass `--airlines XP` or set `AVELO_AIRLINES=XP` in `.env`:
 
 ```bash
 python run_scraper.py --airlines F9 --origins PHL --destinations MCO --days 21 --mode full
 python run_scraper.py --airlines XP,F9 --routes ILG-TPA,PHL-MCO   # each airline gets only the routes it could fly
-AVELO_AIRLINES=XP,F9                                              # in .env: the default when --airlines is omitted
+AVELO_AIRLINES=XP,F9                                              # in .env: the default when --airlines is omitted (XP alone opts Frontier out)
 ```
 
 The nightly job (`run_scraper.py --from-rules`) takes its targets from saved rules, watches and bookings, but only
-for airlines listed in `AVELO_AIRLINES`: a rule that names Frontier does not scrape Frontier until you opt in there.
+for airlines listed in `AVELO_AIRLINES`: with the default `XP,F9` a rule that allows Frontier scrapes it; set `AVELO_AIRLINES=XP` to keep the nightly job Avelo-only.
 
 Frontier fares are shown next to Avelo's: packages mix airlines (fly out on one, back on the other) with each leg
 labelled, the fare calendar and the freshness table read both, and every airline's runs raise their own signals, floors and

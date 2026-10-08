@@ -46,6 +46,15 @@ def test_scrape_plan_counts_what_run_scraper_would_request():
     assert views.scrape_plan([], ["ILG"], ["TPA"], CATALOG) == {}
 
 
+def test_scrape_plan_with_an_empty_frontier_catalog_is_an_upper_estimate_not_zero():
+    # a real scrape refreshes the empty catalog first and then visits every matching route
+    assert views.scrape_plan(["F9"], ["PHL"], ["DEN"], {"F9": []}) == {"F9": 2}
+    assert views.scrape_plan(["F9"], ["PHL"], ["DEN"], {}) == {"F9": 2}
+    assert views.scrape_plan(["F9"], ["ILG"], ["DEN"], {"F9": []}) == {"F9": 0}     # Frontier has no page for ILG
+    plan = views.scrape_plan(["F9", "XP"], ["ILG", "PHL", "BWI"], ["TPA", "MCO", "DEN"], {"F9": [], "XP": []})
+    assert plan["F9"] > 0 and plan["XP"] == 12
+
+
 def test_airline_comparison_puts_each_airlines_best_side_by_side():
     outs = [leg("XP", "ILG", "MCO", 8, 8, 120), leg("F9", "PHL", "MCO", 8, 9, 60, den=59), leg("F9", "PHL", "MCO", 9, 9, 40)]
     backs = [leg("XP", "MCO", "ILG", 11, 15, 100), leg("F9", "MCO", "PHL", 11, 16, 50)]
@@ -74,3 +83,19 @@ def test_program_meter_text():
     text = views.program_meter(den, its)
     assert "Discount Den" in text and "$12" in text and "$9" in text          # booked legs, and the best listed package
     assert views.program_meter({**den, "legs": 0, "would_have_saved": 0.0}, []) is None
+
+
+def test_program_meter_ignores_the_other_airlines_saving_in_a_mixed_package():
+    outs, backs = [leg("XP", "ILG", "MCO", 8, 8, 120, den=90)], [leg("F9", "MCO", "ILG", 11, 16, 50, den=46)]
+    its = build_itineraries(outs, backs, GetawayQuery({"MCO"}, [WINDOW], origins=["ILG"]))
+    assert its[0].airlines == ("XP", "F9") and its[0].program_savings == 34.0
+    den = {"airline": "F9", "program": "Discount Den", "legs": 0, "would_have_saved": 0.0}
+    text = views.program_meter(den, [it for it in its if "F9" in it.airlines])
+    assert "$4" in text and "$34" not in text
+    plus = {"airline": "XP", "program": "Avelo PLUS", "legs": 0, "would_have_saved": 0.0}
+    assert "$30" in views.program_meter(plus, its)
+    # a program whose airline flies no non-member leg in the package has nothing to claim
+    xp_only = {"airline": "XP", "program": "Avelo PLUS", "legs": 0, "would_have_saved": 0.0}
+    only_f9 = build_itineraries([leg("F9", "PHL", "MCO", 8, 9, 60, den=50)], [leg("F9", "MCO", "PHL", 11, 16, 50)],
+                                GetawayQuery({"MCO"}, [WINDOW], origins=["PHL"]))
+    assert views.program_meter(xp_only, only_f9) is None

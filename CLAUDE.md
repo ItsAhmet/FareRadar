@@ -34,10 +34,10 @@ Settings live in `.env` (git-ignored; `.env.example` documents every key).
 `AVELO_NTFY_TOPIC` is set to the owner's private ntfy topic — never print or
 change it unless asked. `AVELO_OFFLINE=1` disables all network calls (weather,
 geocoding, routing, pushes); tests set `config.OFFLINE` via monkeypatch.
-`AVELO_AIRLINES` (default `XP`) picks the airlines a scrape covers when `--airlines` is not given;
-`XP,F9` opts in to Frontier. `--from-rules` (the nightly job) is capped by it too: rules and watches never add an
+`AVELO_AIRLINES` (default `XP,F9`) picks the airlines a scrape covers when `--airlines` is not given;
+`XP` alone opts out of Frontier. `--from-rules` (the nightly job) is capped by it too: rules and watches never add an
 airline it leaves out, and stored airport codes the scraper does not know are skipped with a warning. So Frontier
-rules, watches and bookings are refreshed nightly only after the owner sets `AVELO_AIRLINES=XP,F9`.
+rules, watches and bookings are refreshed nightly unless the owner sets `AVELO_AIRLINES=XP`.
 `AVELO_CARRY_ON_XP` / `AVELO_CARRY_ON_F9` (default 0 / 55) are the carry-on fee estimates in `config.CARRY_ON_FEE`.
 
 A root `conftest.py` plus `pytest.ini` make any test that opens the owner's database (`data/flights.db`, or

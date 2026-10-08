@@ -52,12 +52,15 @@ def destination_label(code: str, served_by: list[str]) -> str:
 
 
 def scrape_plan(airline_codes: Iterable[str], homes: Iterable[str], destinations: Iterable[str], catalog: Catalog) -> dict[str, int]:
-    """Directional routes a scrape of this selection requests, per airline (mirrors run_scraper.routes_for)."""
+    """Directional routes a scrape of this selection requests, per airline (mirrors run_scraper.routes_for).
+
+    A Frontier scrape refreshes an empty catalog before it picks routes, so with no catalog yet the count is
+    an upper estimate from the fallback pairs (same wanted-destination filter), not zero."""
     homes, wanted = [h.upper() for h in homes], {d.upper() for d in destinations}
     plan: dict[str, int] = {}
     for airline in (a.upper() for a in airline_codes):
         if airline == "F9":
-            plan[airline] = 2 * len({(h, d) for h, d in _pairs(airline, homes, catalog) if d in wanted}) if catalog.get(airline) else 0
+            plan[airline] = 2 * len({(h, d) for h, d in _pairs(airline, homes, catalog) if d in wanted})
         else:
             plan[airline] = 2 * len(homes) * len(wanted & set(config.DESTINATIONS))
     return plan
@@ -113,9 +116,20 @@ def airline_comparison(itineraries: list[Itinerary]) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=columns)
 
 
+def _own_program_savings(it: Itinerary, airline: str | None) -> float:
+    """Program savings on the legs this airline flies; other airlines' legs in a mixed package are not its saving."""
+    if airline is None:
+        return it.program_savings
+    saved = 0.0
+    for f in (it.outbound, it.inbound):
+        if f.airline == airline and not f.is_member_fare and f.member_price is not None:
+            saved += max(f.price - f.member_price, 0.0)
+    return round(saved, 2)
+
+
 def program_meter(program: dict, itineraries: list[Itinerary]) -> str | None:
     """Badge text: what the program would have saved on booked legs, and would save on the best listed package."""
-    best = max((it.program_savings for it in itineraries), default=0.0)
+    best = max((_own_program_savings(it, program.get("airline")) for it in itineraries), default=0.0)
     if not program.get("legs") and best <= 0:
         return None
     parts = []
