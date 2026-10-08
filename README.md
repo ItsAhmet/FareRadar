@@ -54,7 +54,7 @@ source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 playwright install chromium        # one-time browser download (~100 MB)
 cp .env.example .env               # optional: tweak headless mode, DB path, etc.
-pytest -q                          # 461 tests, no network needed
+pytest -q                          # 465 tests, no network needed
 ```
 
 The project lives in `~/avelo-finder`, outside iCloud-synced folders. To start
