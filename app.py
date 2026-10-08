@@ -668,8 +668,7 @@ def system_map(selected: list[str], homes: list[str], served: dict[str, list[str
             get_alignment_baseline="'bottom'",
         ),
     ]
-    west = any(config.ALL_AIRPORTS[c].lon < -95 for c in chosen if c in served)   # a western city needs the wider frame
-    view = pdk.ViewState(latitude=30.5, longitude=-88 if west else -77.0, zoom=3.2 if west else 3.9, pitch=0)
+    view = pdk.ViewState(**views.map_view(homes, served, selected), pitch=0)   # wider and re-centred for a western city
     st.pydeck_chart(
         pdk.Deck(layers=layers, initial_view_state=view, tooltip={"text": "{code} · {city}\n{airline_name}"}),
         width="stretch",

@@ -151,6 +151,16 @@ def map_arcs(homes: Iterable[str], served: dict[str, list[str]], selected: Itera
     return arcs
 
 
+def map_view(homes: Iterable[str], plotted: Iterable[str], selected: Iterable[str]) -> dict[str, float]:
+    """Where the map looks. The East Coast frame, unless a selected, offered destination lies west of -95 degrees:
+    then a wider zoom centred on the midpoint of the longitudes drawn, so the West Coast is not cut off."""
+    plotted, chosen = list(plotted), set(selected)
+    if not any(config.ALL_AIRPORTS[c].lon < -95 for c in plotted if c in chosen):
+        return {"latitude": 30.5, "longitude": -77.0, "zoom": 3.9}
+    lons = [config.ALL_AIRPORTS[c.upper()].lon for c in [*homes, *plotted]]
+    return {"latitude": 30.5, "longitude": round((min(lons) + max(lons)) / 2, 1), "zoom": 3.2}
+
+
 def _cost(it: Itinerary) -> float:
     return it.door_to_door_cost if it.door_to_door_cost is not None else round(it.total_price + it.home_side_cost, 2)
 

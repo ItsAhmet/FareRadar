@@ -76,6 +76,19 @@ def test_map_arcs_are_per_home_and_airline():
     assert all(len(a["color"]) == 3 and len(a["source"]) == 2 and a["airline_name"] in ("Avelo", "Frontier") for a in arcs)
 
 
+def test_map_view_keeps_every_dot_inside_a_narrow_map():
+    assert views.map_view(["ILG", "PHL"], ["TPA", "MCO"], ["TPA"]) == {"latitude": 30.5, "longitude": -77.0, "zoom": 3.9}
+    # a selected western city widens the frame and centres it on what is drawn, not on a fixed longitude
+    homes, plotted = ["ILG", "PHL", "BWI"], ["SFO", "LAX", "LAS", "DEN", "TPA"]
+    view = views.map_view(homes, plotted, ["SFO"])
+    assert view["zoom"] == 3.2
+    per_degree = 512 * 2 ** view["zoom"] / 360              # deck.gl: 512 * 2^zoom px per 360 degrees of longitude
+    widths = {c: abs(view["longitude"] - config.ALL_AIRPORTS[c].lon) * per_degree * 2 for c in homes + plotted}
+    assert max(widths.values()) < 700, widths                # the map is about 820 px wide on a 1280 px window
+    assert views.map_view(homes, plotted, ["TPA"])["zoom"] == 3.9     # a western dot that is not selected does not widen
+    assert views.map_view(homes, ["TPA"], ["SFO"])["zoom"] == 3.9     # nor does a selected city that is no longer offered
+
+
 def test_program_meter_text():
     den = {"airline": "F9", "program": "Discount Den", "legs": 2, "would_have_saved": 12.0}
     outs, backs = [leg("F9", "PHL", "MCO", 8, 9, 60, den=55)], [leg("F9", "MCO", "PHL", 11, 16, 50, den=46)]
