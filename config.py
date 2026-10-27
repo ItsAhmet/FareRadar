@@ -285,7 +285,7 @@ NOTIFY_TIMEOUT_S: int = 6
 # Nightly job defaults (local time).
 SCHEDULE_HOUR: int = int(os.getenv("AVELO_SCHEDULE_HOUR", "3"))
 SCHEDULE_MINUTE: int = int(os.getenv("AVELO_SCHEDULE_MINUTE", "15"))
-SCHEDULE_LABEL = "com.avelo-finder.scrape"
+SCHEDULE_LABEL = "com.fareradar.scrape"
 
 # --------------------------------------------------------------------------- #
 # Housekeeping

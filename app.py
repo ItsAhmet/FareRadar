@@ -52,7 +52,7 @@ from optimizer import (
 )
 from run_scraper import build_command
 
-st.set_page_config(page_title="Avelo Getaways", page_icon="✈️", layout="wide")
+st.set_page_config(page_title="FareRadar", page_icon="✈️", layout="wide")
 
 PRICE_SCALE = ["#e8f1fb", "#b9d3f0", "#84b0e3", "#4f8bd3", "#2a63b8", "#153f8a"]  # one hue, light = cheap
 ACCENT = "#2a63b8"

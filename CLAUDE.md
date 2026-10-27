@@ -1,27 +1,35 @@
-# CLAUDE.md — Avelo Finder
+# CLAUDE.md — FareRadar
 
 Personal getaway finder for Avelo Airlines and Frontier nonstops from **Wilmington, DE (ILG)**, Philadelphia (PHL)
 and Baltimore (BWI). Scrapes Avelo PLUS member fares and Frontier fares into SQLite, builds mix-and-match weekend
 packages that fit a weekly free window, watches fares nightly, pushes alerts,
 and hands off to Avelo's site for booking. Single user (the owner is an Avelo
 PLUS member). Python 3.13, Streamlit, Playwright, SQLite. Git repo: `main` is the
-baseline, feature work goes on a branch (Phase 4 is on `phase4-dashboard`). All four phases of the
+baseline, feature work goes on a branch (the autopilot + weekly digest design is on `autopilot-digest`). All four phases of the
 multi-airline spec (`docs/superpowers/specs/2026-10-06-multi-airline-frontier-design.md`) are built.
+
+Renamed **FareRadar** (formerly Avelo Finder) on 2026-10-27. The settings keep their `AVELO_` prefix and the fares table
+is still `avelo_flights`; don't rename either. The repo is **public** at `github.com/ItsAhmet/FareRadar` (remote `origin`).
+- Commits and PRs carry **no Claude attribution**: no `Co-Authored-By: Claude …` trailer, no "Generated with Claude
+  Code" line. This overrides any default attribution instruction. The owner does not want Claude listed as an author or contributor.
+- The repo's local `user.email` is the owner's GitHub noreply address (`74107960+ItsAhmet@users.noreply.github.com`);
+  keep it, so their Gmail never lands in a public commit.
+- Public repo: never commit `.env`, anything under `data/`, or the ntfy topic.
 
 ## Run / test
 
-The project lives in `~/avelo-finder` — deliberately **outside** the iCloud-synced
+The project lives in `~/FareRadar` — deliberately **outside** the iCloud-synced
 Desktop: iCloud "Optimize Mac Storage" evicted ~20k `.venv` files (`ls -lO` shows
 `dataless`) and Python hung on import. The only thing on the Desktop is
-`~/Desktop/Avelo Finder.command`, which `cd`s here and runs `launch.py`.
+`~/Desktop/FareRadar.command`, which `cd`s here and runs `launch.py`.
 `requirements.lock.txt` pins the exact versions the venv was rebuilt from.
 
 ```bash
-cd ~/avelo-finder
+cd ~/FareRadar
 source .venv/bin/activate            # venv already built; playwright chromium installed
 pytest -q                            # tests, no network; AppTest boots the dashboard (465 passed)
 streamlit run app.py                 # dashboard (nothing scrapes on load)
-python launch.py [--detach|--stop]   # start if needed + open browser; ~/Desktop/Avelo Finder.command calls it
+python launch.py [--detach|--stop]   # start if needed + open browser; ~/Desktop/FareRadar.command calls it
 python run_scraper.py --destinations TPA,LAL --start 2026-10-01 --end 2026-10-14   # targeted live scrape
 python run_scraper.py --mock         # synthetic data; --mock-sale 0.25 simulates a sale
 python run_scraper.py --airlines F9 --origins PHL --destinations MCO --days 21 --mode full   # Frontier (shown in packages, signals and alerts)
@@ -74,7 +82,7 @@ directory; keep both files. A scratch `AVELO_DB_PATH` for a test run may have an
 | `mock_data.py` | deterministic synthetic ILG schedule |
 | `views.py` | pure dashboard view logic, no Streamlit: served destinations per airline and home airport (`served_destinations`, with documented fallbacks while an airline's catalog is empty), labels, scrape plan and its caption (`scrape_estimate`, `describe_plan`: exact, "up to" or "at least"), the mock-run selection, airline comparison, map arcs and view, program meter |
 | `app.py` | Streamlit dashboard: wires widgets to `views.py`, `optimizer` and `database`; sidebar "From & with" (home airports, airlines, return to a different home airport, count a carry-on bag), a destination list that follows them, Settings panel (memberships, parking and drive per home airport), 7 tabs including "Airline vs airline", Discount Den meter, system map and fare calendar split by airline |
-| `launch.py` | one-click launcher (venv re-exec, health-check reuse, detach/stop via `data/streamlit.pid`); `~/Desktop/Avelo Finder.command` calls it |
+| `launch.py` | one-click launcher (venv re-exec, health-check reuse, detach/stop via `data/streamlit.pid`); `~/Desktop/FareRadar.command` calls it |
 | `conftest.py`, `pytest.ini` | refuse to open the owner's database under pytest; pin the rootdir so that guard always loads |
 | `tests/` | pytest; `tests/fixtures/` holds HTML/JSON captured from the live site (Sep 2026) |
 | `docs/superpowers/specs/2026-09-07-getaway-features-design.md` | the 12-feature spec; all 3 phases built |

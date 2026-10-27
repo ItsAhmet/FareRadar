@@ -52,7 +52,7 @@ def wait_until_up(timeout: float = 45) -> bool:
 
 def start(detach: bool) -> int:
     if is_running():
-        print(f"Avelo Finder already running → {URL}")
+        print(f"FareRadar already running → {URL}")
         webbrowser.open(URL)
         return 0
 
@@ -68,7 +68,7 @@ def start(detach: bool) -> int:
     else:
         proc = subprocess.Popen(cmd, cwd=ROOT)
 
-    print(f"Starting Avelo Finder on {URL} …")
+    print(f"Starting FareRadar on {URL} …")
     if not wait_until_up(timeout=90):
         proc.terminate()
         print(f"Server didn't come up within 90s; see {LOG_FILE if detach else 'output above'}.")
@@ -93,7 +93,7 @@ def stop() -> int:
     pid = int(PID_FILE.read_text())
     try:
         os.killpg(pid, signal.SIGTERM)
-        print(f"Stopped Avelo Finder (pid {pid}).")
+        print(f"Stopped FareRadar (pid {pid}).")
     except ProcessLookupError:
         print("Server was already stopped.")
     PID_FILE.unlink(missing_ok=True)
